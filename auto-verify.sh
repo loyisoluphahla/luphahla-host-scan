@@ -1,7 +1,8 @@
+
 #!/usr/bin/env bash
-# Luphahla Host Scan - Unified Scanner (Liveness + Zero-Rating simultaneously)
-# Checks TLS, HTTP headers, and speed in one pass.
-# Usage: ./auto-verify.sh
+# Luphahla Host Scan - WIDE MODE (Multi-Port + SYN Scan)
+# Scans ports: 80, 443, 465, 587, 993, 995, 8080, 8443, 3128, 1080
+# WARNING: SYN scans are detectable. Use at your own risk.
 
 set -o pipefail
 
@@ -23,14 +24,14 @@ fi
 
 # ---------- Defaults ----------
 USE_COLOR=true
-TIMEOUT=5
-PARALLEL=30
-BATCH_SIZE=5000
+TIMEOUT=3
+PARALLEL=20
+BATCH_SIZE=500
 OUTPUT_FILE="${HOME}/sni_hosts_latest.txt"
-SCORED_FILE="${HOME}/sni_hosts_scored.txt"   # New: saves scores!
-CACHE_FILE="${HOME}/.cache/sni_hosts_cached.txt"
+WIDE_OUTPUT="${HOME}/sni_wide_results.txt"
 TDIR="${HOME}/.cache/luphahla-scan"
 START_TIME=$(date +%s)
+WIDE_MODE=false
 
 # ---------- Parse arguments ----------
 while [ $# -gt 0 ]; do
@@ -39,9 +40,11 @@ while [ $# -gt 0 ]; do
     --timeout)       TIMEOUT="$2"; shift ;;
     --parallel)      PARALLEL="$2"; shift ;;
     --batch)         BATCH_SIZE="$2"; shift ;;
+    --wide)          WIDE_MODE=true ;;   # <-- NEW FLAG (Multi-Port + SYN)
     --help|-h)
-      echo "Luphahla Unified Scanner"
-      echo "  Scans for live hosts AND zero-rating in the same pass."
+      echo "Luphahla Host Scan - WIDE MODE"
+      echo "  --wide        : Scan 10 ports (80,443,465,587,993,995,8080,8443,3128,1080)"
+      echo "  --timeout 3   : Faster scans."
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -62,10 +65,8 @@ fi
 mkdir -p "$TDIR" || { echo -e "${RED}Error: Could not create $TDIR${RESET}" >&2; exit 1; }
 trap 'rm -rf "$TDIR"' EXIT INT TERM
 FRESH_FILE="$TDIR/fresh_sni.txt"
-LIVE_FILE="$TDIR/live.txt"
-SCORED_RAW="$TDIR/scored_raw.txt"
-: > "$LIVE_FILE"
-: > "$SCORED_RAW"
+WIDE_RAW="$TDIR/wide_raw.txt"
+: > "$WIDE_RAW"
 
 # ---------- Banner ----------
 [ -t 1 ] && clear
@@ -77,10 +78,11 @@ echo "  ██║     ██║   ██║██╔═══╝ ██╔══
 echo "  ███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║ "
 echo "  ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ "
 echo -e "${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}   U N I F I E D   L I V E   +   Z E R O   S C A N   🔄🚀${RESET}"
-echo -e "${CYAN}          Luphahla Host Scan - Batch + Zero-Rated${RESET}"
+echo -e "${BRIGHT_YELLOW}${BOLD}      W I D E   M O D E   (Multi-Port + SYN Scan)   🌊${RESET}"
+echo -e "${RED}   ⚠ SYN scans 10 ports. Detectable by ISP firewalls.${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
-echo -e "  ${YELLOW}Batch Size:${RESET} ${BRIGHT_WHITE}$BATCH_SIZE${RESET}  ${YELLOW}Timeout:${RESET} ${BRIGHT_WHITE}${TIMEOUT}s${RESET}  ${YELLOW}Parallel:${RESET} ${BRIGHT_WHITE}$PARALLEL${RESET}"
+echo -e "  ${YELLOW}Ports:${RESET} 80,443,465,587,993,995,8080,8443,3128,1080"
+echo -e "  ${YELLOW}Batch:${RESET} ${BRIGHT_WHITE}$BATCH_SIZE${RESET}  ${YELLOW}Timeout:${RESET} ${BRIGHT_WHITE}${TIMEOUT}s${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
 echo ""
 
@@ -94,7 +96,7 @@ else
 fi
 
 # ============================================================
-#  DISCOVERY ENGINE (Grabs ALL IPs & Domains)
+#  DISCOVERY ENGINE (Same as before to fetch targets)
 # ============================================================
 echo ""
 echo -e "${BRIGHT_BLUE}${BOLD}  ── Grabbing targets ──${RESET}"
@@ -122,10 +124,6 @@ if [ "$ONLINE" = true ]; then
         elif [ "$mask" -eq 16 ]; then
           local prefix="${base%.*.*}"
           for i in $(seq 0 255); do for j in $(seq 1 254); do echo "${prefix}.${i}.${j}"; done; done
-        elif [ "$mask" -eq 8 ]; then
-          echo -e "  ${BRIGHT_YELLOW}⚠ /8 range (16M IPs) - will be huge!${RESET}"
-          local prefix="${base%.*.*.*}"
-          for i in $(seq 0 255); do for j in $(seq 0 255); do for k in $(seq 1 254); do echo "${prefix}.${i}.${j}.${k}"; done; done; done
         else
           local prefix="${base%.*}"; for i in $(seq 1 254); do echo "${prefix}.${i}"; done
         fi
@@ -154,17 +152,12 @@ fi
 [ -f "$TDIR/isp_ips.txt" ] && cat "$TDIR/isp_ips.txt" >> "$FRESH_FILE"
 [ -f "$TDIR/ct_hosts.txt" ] && cat "$TDIR/ct_hosts.txt" >> "$FRESH_FILE"
 [ -f "$OUTPUT_FILE" ] && cat "$OUTPUT_FILE" >> "$FRESH_FILE"
-[ -f "$CACHE_FILE" ] && cat "$CACHE_FILE" >> "$FRESH_FILE"
 if [ ! -s "$FRESH_FILE" ]; then
   echo -e "  ${YELLOW}⚠ Emergency fallback.${RESET}"
   cat > "$FRESH_FILE" << 'EOF'
 google.com
 youtube.com
 facebook.com
-whatsapp.com
-instagram.com
-microsoft.com
-amazon.com
 EOF
 fi
 sort -u "$FRESH_FILE" -o "$FRESH_FILE"
@@ -175,124 +168,107 @@ echo -e "  ${GREEN}✓${RESET} Total targets: ${BRIGHT_CYAN}$TOTAL${RESET}"
 echo ""
 
 # ============================================================
-#  UNIFIED INSPECTION FUNCTION (TLS + HTTP + Speed)
+#  WIDE INSPECTION FUNCTION (SYN + Multi-Port Probe)
 # ============================================================
-inspect_host() {
+wide_inspect() {
   local host="$1"
-  local port="$2"
-  local score=0
-  local speed="N/A"
-  local zero_label="Unknown"
-  local server_header=""
+  local ports="80 443 465 587 993 995 8080 8443 3128 1080"
+  local found=""
 
-  # 1. TLS Handshake (Liveness)
-  if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -verify_return_error -verify_ip "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1 || return 1
-  else
-    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1 || return 1
-  fi
-  score=$((score + 30))
+  for port in $ports; do
+    # 1. SYN Scan using nc (-zv)
+    if command -v nc >/dev/null; then
+      if _timeout 2 nc -zv "$host" "$port" 2>/dev/null | grep -q open; then
+        found="${found}${port},"
+        
+        # 2. If it's a TLS port, do a handshake
+        if [[ "$port" =~ ^(443|465|587|993|995|8443)$ ]]; then
+          local server_header=""
+          local tls_result=""
+          if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            tls_result=$(echo | _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -verify_return_error -verify_ip "$host" -verify_quiet -brief -no_ign_eof 2>/dev/null | grep -i "^Server:" | head -1)
+          else
+            tls_result=$(echo | _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -verify_quiet -brief -no_ign_eof 2>/dev/null | grep -i "^Server:" | head -1)
+          fi
+          
+          if [[ "$tls_result" =~ (gws|google) ]]; then
+            server_header="Google (FREE)"
+          elif [[ "$tls_result" =~ (cloudflare) ]]; then
+            server_header="Cloudflare (FREE)"
+          elif [[ "$tls_result" =~ (facebook|meta) ]]; then
+            server_header="Meta (FREE)"
+          else
+            server_header="TLS/Unknown"
+          fi
+          echo "PORT|${host}|${port}|TLS|${server_header}"
+        fi
 
-  # 2. HTTP Headers (Zero-Rating Detection)
-  if command -v curl >/dev/null; then
-    local headers
-    headers=$(curl -s -I -m "$TIMEOUT" -k "https://${host}:${port}" 2>/dev/null)
-    server_header=$(echo "$headers" | grep -i "^Server:" | head -1)
-    
-    if echo "$server_header" | grep -qi "gws\|google\|youtube"; then
-      zero_label="Google (Free)"
-      score=$((score + 40))
-    elif echo "$server_header" | grep -qi "facebook\|meta\|whatsapp\|instagram"; then
-      zero_label="Meta (Free)"
-      score=$((score + 40))
-    elif echo "$server_header" | grep -qi "cloudflare"; then
-      zero_label="Cloudflare (Often Free)"
-      score=$((score + 35))
-    elif echo "$server_header" | grep -qi "microsoft\|iis"; then
-      zero_label="Microsoft (Sometimes Free)"
-      score=$((score + 25))
-    elif echo "$server_header" | grep -qi "amazon\|aws\|cloudfront"; then
-      zero_label="Amazon (Often Free)"
-      score=$((score + 25))
-    else
-      zero_label="Unknown"
-      score=$((score + 5))
-    fi
+        # 3. If it's an HTTP port (80, 8080), try curl HEAD
+        if [[ "$port" =~ ^(80|8080)$ ]]; then
+          if command -v curl >/dev/null; then
+            local http_header
+            http_header=$(curl -s -I -m "$TIMEOUT" "http://${host}:${port}" 2>/dev/null | grep -i "^Server:" | head -1)
+            if [ -n "$http_header" ]; then
+              echo "PORT|${host}|${port}|HTTP|${http_header}"
+            else
+              echo "PORT|${host}|${port}|HTTP_OPEN|NoServer"
+            fi
+          fi
+        fi
 
-    # 3. Speed Test
-    local speed_result
-    speed_result=$(curl -s -o /dev/null -w "%{speed_download}" -m "$TIMEOUT" -k "https://${host}:${port}" 2>/dev/null)
-    if [[ "$speed_result" =~ ^[0-9]+ ]] && [ "$speed_result" -gt 0 ]; then
-      speed_kb=$(echo "$speed_result / 1024" | bc 2>/dev/null)
-      if [ -n "$speed_kb" ]; then
-        if [ "$speed_kb" -gt 100 ]; then
-          score=$((score + 25)); speed="⚡ ${speed_kb} KB/s"
-        elif [ "$speed_kb" -gt 10 ]; then
-          score=$((score + 10)); speed="🐢 ${speed_kb} KB/s"
-        else
-          speed="⛔ ${speed_kb} KB/s"
+        # 4. Proxy ports (3128, 1080) - just note they're open
+        if [[ "$port" =~ ^(3128|1080)$ ]]; then
+          echo "PORT|${host}|${port}|PROXY_OPEN|"
         fi
       fi
-    else
-      speed="⛔ No Data"
     fi
-  else
-    score=$((score - 10))
-    speed="Install curl for full detection"
-  fi
-
-  # Output: SCORE|HOST|ZERO_LABEL|SPEED
-  echo "${score}|${host}|${zero_label}|${speed}"
+  done
 }
-export -f inspect_host _timeout
+export -f wide_inspect _timeout
 export TIMEOUT
 
-# ---------- Scan a single batch (unified) ----------
-scan_batch() {
+# ---------- Scan Batch ----------
+scan_batch_wide() {
   local batch_file="$1"
-  local port="$2"
-  local tmp_scored="$TDIR/scored_${port}_$$.txt"
-  : > "$tmp_scored"
+  local tmp_raw="$TDIR/wide_batch.txt"
+  : > "$tmp_raw"
 
   if command -v xargs >/dev/null && xargs --help 2>&1 | grep -q -- '-P'; then
     grep -vE '^[[:space:]]*(#|$)' "$batch_file" | \
       xargs -P "$PARALLEL" -I {} bash -c '
-        inspect_host "$1" '"$port"'
-      ' _ {} >> "$tmp_scored" 2>/dev/null &
+        wide_inspect "$1"
+      ' _ {} > "$tmp_raw" 2>/dev/null &
     local pid=$!
     local spin='⣾⣽⣻⢿⡿⣟⣯⣷'
     local i=0
     while kill -0 "$pid" 2>/dev/null; do
-      printf "\r  ${CYAN}${spin:i++%${#spin}:1}${RESET} Unified scan (live+zero) port $port..."
+      printf "\r  ${BRIGHT_YELLOW}${spin:i++%${#spin}:1}${RESET} Wide scanning (10 ports)..."
       sleep 0.1
     done
     wait "$pid"
-    printf "\r  ${GREEN}✓${RESET} Port $port unified scan complete.                    \n"
+    printf "\r  ${GREEN}✓${RESET} Wide scan complete.                    \n"
   else
     while IFS= read -r host; do
       [[ "$host" =~ ^[[:space:]]*# ]] && continue
       [ -z "$host" ] && continue
-      inspect_host "$host" "$port" >> "$tmp_scored"
+      wide_inspect "$host" >> "$tmp_raw"
     done < "$batch_file"
   fi
 
-  # Merge scored results into the global scored file
-  cat "$tmp_scored" >> "$SCORED_RAW"
+  cat "$tmp_raw" >> "$WIDE_RAW"
 }
 
 # ============================================================
-#  INTERACTIVE BATCH PROCESSING ENGINE
+#  BATCH ENGINE
 # ============================================================
 BATCH_NUM=1
 START_LINE=1
 
 if [ "$TOTAL" -le "$BATCH_SIZE" ]; then
-  echo -e "${BRIGHT_BLUE}${BOLD}  ── Unified scan (single batch) ──${RESET}"
-  scan_batch "$FRESH_FILE" "443"
-  # Optional: also check 8080? 443 is usually enough for zero-rating, skip 8080 to save time.
+  echo -e "${BRIGHT_BLUE}${BOLD}  ── Wide scan (single batch) ──${RESET}"
+  scan_batch_wide "$FRESH_FILE"
 else
-  echo -e "${BRIGHT_BLUE}${BOLD}  ── Interactive Batching (${BATCH_SIZE} per batch) ──${RESET}"
-  
+  echo -e "${BRIGHT_BLUE}${BOLD}  ── Wide batching (${BATCH_SIZE} per batch) ──${RESET}"
   while [ $START_LINE -le "$TOTAL" ]; do
     END_LINE=$((START_LINE + BATCH_SIZE - 1))
     [ $END_LINE -gt "$TOTAL" ] && END_LINE="$TOTAL"
@@ -302,91 +278,70 @@ else
     BATCH_COUNT=$((END_LINE - START_LINE + 1))
     
     echo ""
-    echo -e "${BRIGHT_CYAN}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
-    echo -e "${BRIGHT_CYAN}${BOLD}  ║         BATCH #${BATCH_NUM} (${BATCH_COUNT} hosts)           ║${RESET}"
-    echo -e "${BRIGHT_CYAN}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
+    echo -e "${BRIGHT_YELLOW}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
+    echo -e "${BRIGHT_YELLOW}${BOLD}  ║     WIDE BATCH #${BATCH_NUM} (${BATCH_COUNT} hosts)     ║${RESET}"
+    echo -e "${BRIGHT_YELLOW}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
     
-    scan_batch "$BATCH_FILE" "443"
-    
-    # Count current live (scored) hosts
-    CURRENT_LIVE=$(grep -cve '^[[:space:]]*$' "$SCORED_RAW" 2>/dev/null || echo 0)
-    echo -e "  ${GREEN}✓${RESET} Live+Scored hosts so far: ${BRIGHT_WHITE}$CURRENT_LIVE${RESET}"
-    
-    # Show top 5 scored results from this batch
-    if [ -f "$SCORED_RAW" ] && [ "$CURRENT_LIVE" -gt 0 ]; then
-      echo -e "  ${BRIGHT_CYAN}Top scored from this batch:${RESET}"
-      tail -n "$BATCH_COUNT" "$SCORED_RAW" 2>/dev/null | sort -t'|' -k1 -nr | head -5 | while IFS='|' read -r score host zero speed; do
-        if [ "$score" -gt 70 ]; then label="${BRIGHT_GREEN}[HIGH]${RESET}"; elif [ "$score" -gt 40 ]; then label="${BRIGHT_YELLOW}[MEDIUM]${RESET}"; else label="${BRIGHT_RED}[LOW]${RESET}"; fi
-        printf "    %-8s ${CYAN}%-25s${RESET} ${DIM}%-20s %s${RESET}\n" "$label" "$host" "$zero" "$speed"
-      done
-    fi
+    scan_batch_wide "$BATCH_FILE"
+    CURRENT=$(wc -l < "$WIDE_RAW")
+    echo -e "  ${GREEN}✓${RESET} Processed: ${BRIGHT_WHITE}$CURRENT${RESET}"
 
-    if [ $END_LINE -ge "$TOTAL" ]; then
-      echo -e "  ${GREEN}✓ All batches processed!${RESET}"
-      break
-    fi
+    if [ $END_LINE -ge "$TOTAL" ]; then break; fi
     
     REMAINING=$((TOTAL - END_LINE))
     echo ""
-    echo -e "${BRIGHT_YELLOW}${BOLD}  ─── Next batch: ${REMAINING} hosts remaining ───${RESET}"
-    echo "  [1] Continue to next batch"
-    echo "  [2] Stop and Save results (Exit gracefully)"
-    echo "  [0] Exit immediately (kill script)"
-    echo ""
+    echo -e "${BRIGHT_YELLOW}${BOLD}  ─── Next batch: ${REMAINING} hosts ───${RESET}"
+    echo "  [1] Continue"
+    echo "  [2] Stop & Save"
+    echo "  [0] Exit"
     read -p "  Choose [1/2/0]: " CHOICE
-    
     case "$CHOICE" in
-      0) echo -e "  ${RED}Exiting. Results NOT saved.${RESET}"; exit 0 ;;
-      2) echo -e "  ${GREEN}Stopping. Saving results.${RESET}"; break ;;
-      1|*) echo -e "  ${CYAN}Continuing...${RESET}"; START_LINE=$((END_LINE + 1)); BATCH_NUM=$((BATCH_NUM + 1)) ;;
+      0) echo "Exiting."; exit 0 ;;
+      2) echo "Saving."; break ;;
+      1|*) START_LINE=$((END_LINE + 1)); BATCH_NUM=$((BATCH_NUM + 1)) ;;
     esac
   done
 fi
 
 # ============================================================
-#  FINALIZE, SORT, AND SAVE RESULTS
+#  FINAL RESULTS
 # ============================================================
-# Extract live hosts (for compatibility) - only those with a score > 30 (actual TLS success)
-sort -u "$SCORED_RAW" -o "$SCORED_RAW"
-grep -vE '^[[:space:]]*$' "$SCORED_RAW" > "$SCORED_RAW.tmp"
-mv "$SCORED_RAW.tmp" "$SCORED_RAW"
-
-LIVECOUNT=$(wc -l < "$SCORED_RAW")
-
-# Generate plain host list from scored data
-cut -d'|' -f2 "$SCORED_RAW" > "$LIVE_FILE"
+sort -u "$WIDE_RAW" -o "$WIDE_RAW"
+cp "$WIDE_RAW" "$WIDE_OUTPUT"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
 echo ""
 echo -e "${BRIGHT_GREEN}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ║    F I N A L   R E S U L T S          ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║       W I D E   R E S U L T S         ║${RESET}"
 echo -e "${BRIGHT_GREEN}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
-echo -e "  ${CYAN}●${RESET} Total Candidates: ${BRIGHT_WHITE}$TOTAL${RESET}"
-echo -e "  ${CYAN}●${RESET} Live + Scored:     ${BRIGHT_GREEN}$LIVECOUNT${RESET}"
-echo -e "  ${CYAN}●${RESET} Duration:          ${BRIGHT_YELLOW}${DURATION}s${RESET}"
+echo -e "  ${CYAN}●${RESET} Candidates: ${BRIGHT_WHITE}$TOTAL${RESET}"
+echo -e "  ${CYAN}●${RESET} Duration:   ${BRIGHT_YELLOW}${DURATION}s${RESET}"
+echo ""
 
-if [ "$LIVECOUNT" -gt 0 ]; then
-  cp "$LIVE_FILE" "$OUTPUT_FILE"
-  cp "$LIVE_FILE" "$CACHE_FILE"
-  cp "$SCORED_RAW" "$SCORED_FILE"
-  
-  echo -e "  ${GREEN}✓${RESET} Plain list saved to ${BRIGHT_WHITE}$OUTPUT_FILE${RESET}"
-  echo -e "  ${GREEN}✓${RESET} Scored list saved to ${BRIGHT_WHITE}$SCORED_FILE${RESET}"
-  
-  echo ""
-  echo -e "${BRIGHT_CYAN}${BOLD}  ── Scored Hosts (Highest First) ──${RESET}"
-  sort -t'|' -k1 -nr "$SCORED_RAW" | while IFS='|' read -r score host zero speed; do
-    if [ "$score" -gt 70 ]; then label="${BRIGHT_GREEN}[HIGH]${RESET}"; elif [ "$score" -gt 40 ]; then label="${BRIGHT_YELLOW}[MEDIUM]${RESET}"; else label="${BRIGHT_RED}[LOW]${RESET}"; fi
-    printf "  %-8s ${CYAN}%-30s${RESET} ${DIM}%-20s %s${RESET}\n" "$label" "$host" "$zero" "$speed"
-  done
-else
-  echo -e "  ${YELLOW}No live hosts found.${RESET}"
-fi
+# ---------- Display Wide Results ----------
+echo -e "${BRIGHT_GREEN}${BOLD}  ── FREE / ZERO-RATED (TLS/HTTP) ──${RESET}"
+grep "FREE" "$WIDE_OUTPUT" | while IFS='|' read -r trash host port proto header; do
+  echo -e "  ${BRIGHT_GREEN}✅${RESET} ${CYAN}$host${RESET}:${BRIGHT_WHITE}$port${RESET} ${DIM}$header${RESET}"
+done
 
 echo ""
-echo -e "${BRIGHT_MAGENTA}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_MAGENTA}${BOLD}  ║   UNIFIED SCAN COMPLETE (${BATCH_NUM} batches)   ║${RESET}"
-echo -e "${BRIGHT_MAGENTA}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
+echo -e "${BRIGHT_YELLOW}${BOLD}  ── OPEN PORTS (SYN Found) ──${RESET}"
+grep "PORT|" "$WIDE_OUTPUT" | grep -v "FREE" | while IFS='|' read -r trash host port proto header; do
+  echo -e "  ${BRIGHT_YELLOW}🔓${RESET} ${CYAN}$host${RESET}:${BRIGHT_WHITE}$port${RESET} ${DIM}$proto${RESET}"
+done
+
+echo ""
+echo -e "${BRIGHT_RED}${BOLD}  ── PROXY PORTS (3128,1080) ──${RESET}"
+grep "PROXY_OPEN" "$WIDE_OUTPUT" | while IFS='|' read -r trash host port; do
+  echo -e "  ${BRIGHT_RED}🔀${RESET} ${CYAN}$host${RESET}:${BRIGHT_WHITE}$port${RESET} ${DIM}(Proxy)${RESET}"
+done
+
+echo ""
+echo -e "  ${GREEN}✓${RESET} Full log saved to ${BRIGHT_WHITE}$WIDE_OUTPUT${RESET}"
+echo ""
+echo -e "${BRIGHT_RED}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_RED}${BOLD}  ║   WIDE SCAN COMPLETE (10 ports)      ║${RESET}"
+echo -e "${BRIGHT_RED}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
 exit 0
