@@ -1,199 +1,208 @@
-#!/data/data/com.termux/files/usr/bin/bash
-# Luphahla Host Scan
-# auto-verify.sh — Online/Offline/Wi-Fi/Mobile
+#!/usr/bin/env bash
+# Luphahla Host Scan - auto-verify.sh (GLOBAL)
+# Automatically builds a GLOBAL host list and verifies TLS in parallel.
+# Options:
+#   --no-color        disable colors
+#   --timeout N       timeout per host (default 5)
+#   --parallel N      parallel jobs (default 30)
+#   --hosts-file FILE use custom host list instead of built-in
+#   -o FILE           write live hosts to FILE (default: ~/sni_hosts_latest.txt)
+#   --help            show help
 
 set -o pipefail
 
-# ==============================
-# LUPHAHLA HOST SCAN
-# ==============================
-RESET='\033[0m'
-BOLD='\033[1m'
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-WHITE='\033[37m'
-BRIGHT_RED='\033[91m'
-BRIGHT_BLUE='\033[94m'
-BRIGHT_CYAN='\033[96m'
-DIM='\033[2m'
+# ---------- Portable wrappers ----------
+if command -v timeout >/dev/null 2>&1; then
+  _timeout() { timeout "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+  _timeout() { gtimeout "$@"; }
+else
+  _timeout() {
+    local secs="$1"; shift
+    ( "$@" ) &
+    local pid=$!
+    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) &
+    wait "$pid" 2>/dev/null
+    return $?
+  }
+fi
 
+# Portable stat
+_get_mtime() {
+  local file="$1"
+  if stat -c %y "$file" 2>/dev/null; then
+    stat -c %y "$file"
+  else
+    stat -f %Sm "$file" 2>/dev/null
+  fi
+}
+export -f _get_mtime
+
+# ---------- Defaults ----------
 USE_COLOR=true
 TIMEOUT=5
+PARALLEL=30
+HOSTS_FILE=""
+OUTPUT_FILE="${HOME}/sni_hosts_latest.txt"
+CACHE_FILE="${HOME}/.cache/sni_hosts_cached.txt"
+TDIR="${HOME}/.cache/luphahla-scan"
+START_TIME=$(date +%s)
 
+# ---------- Parse arguments ----------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --no-color)
-      USE_COLOR=false
-      ;;
-    --timeout)
-      if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 1 ]; then
-        echo "Error: --timeout requires a positive number."
-        exit 2
-      fi
-      TIMEOUT="$2"
-      shift
-      ;;
+    --no-color)      USE_COLOR=false ;;
+    --timeout)       TIMEOUT="$2"; shift ;;
+    --parallel)      PARALLEL="$2"; shift ;;
+    --hosts-file)    HOSTS_FILE="$2"; shift ;;
+    -o)              OUTPUT_FILE="$2"; shift ;;
     --help|-h)
-      echo "Luphahla Host Scan"
-      echo ""
-      echo "Usage:"
-      echo "  ./auto-verify.sh"
-      echo "  ./auto-verify.sh --no-color"
-      echo "  ./auto-verify.sh --timeout 10"
+      sed -n '2,/^$/p' "$0" | sed 's/^# //'
       exit 0
       ;;
     *)
-      echo "Error: Unknown option: $1"
-      echo "Use --help for usage."
+      echo "Unknown option: $1" >&2
       exit 2
       ;;
   esac
   shift
 done
 
+# ---------- Color setup ----------
 if [ "$USE_COLOR" = false ]; then
-  RESET=''
-  BOLD=''
-  RED=''
-  GREEN=''
-  YELLOW=''
-  BLUE=''
-  CYAN=''
-  WHITE=''
-  BRIGHT_RED=''
-  BRIGHT_BLUE=''
-  BRIGHT_CYAN=''
-  DIM=''
+  RESET=''; BOLD=''; DIM=''; UNDERLINE=''
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; MAGENTA=''; WHITE=''
+  BRIGHT_RED=''; BRIGHT_GREEN=''; BRIGHT_YELLOW=''; BRIGHT_BLUE=''; BRIGHT_CYAN=''; BRIGHT_MAGENTA=''
+else
+  RESET='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'; UNDERLINE='\033[4m'
+  RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; MAGENTA='\033[35m'; WHITE='\033[37m'
+  BRIGHT_RED='\033[91m'; BRIGHT_GREEN='\033[92m'; BRIGHT_YELLOW='\033[93m'; BRIGHT_BLUE='\033[94m'; BRIGHT_CYAN='\033[96m'; BRIGHT_MAGENTA='\033[95m'
 fi
 
-LIST=~/sni_hosts_latest.txt
-CACHE=~/.cache/sni_hosts_cached.txt
-TDIR=$HOME/.cache/sni-scanner
-
-START_TIME=$(date +%s)
-
-cleanup() {
-  rm -rf "$TDIR"
-}
-trap cleanup EXIT INT TERM
-
+# ---------- Setup temp dirs ----------
 mkdir -p "$TDIR" || {
-  echo -e "${RED}Error: Could not create scanner directory.${RESET}"
+  echo -e "${RED}Error: Could not create $TDIR${RESET}" >&2
   exit 1
 }
+trap 'rm -rf "$TDIR"' EXIT INT TERM
+FRESH_FILE="$TDIR/fresh_sni.txt"
+LIVE_FILE="$TDIR/live.txt"
+: > "$LIVE_FILE"
 
-rm -f "$TDIR/fresh_sni.txt"
-
-clear
-
+# ---------- Banner ----------
+[ -t 1 ] && clear
 echo -e "${BRIGHT_RED}${BOLD}"
-echo "██╗     ██╗   ██╗██████╗ ██╗  ██╗ █████╗ ██╗  ██╗██╗      █████╗"
-echo "██║     ██║   ██║██╔══██╗██║  ██║██╔══██╗██║  ██║██║     ██╔══██╗"
-echo "██║     ██║   ██║██████╔╝███████║███████║███████║██║     ███████║"
-echo "██║     ██║   ██║██╔═══╝ ██╔══██║██╔══██║██╔══██║██║     ██╔══██║"
-echo "███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║"
-echo "╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝"
+echo "  ██╗     ██╗   ██╗██████╗ ██╗  ██╗ █████╗ ██╗  ██╗██╗      █████╗  "
+echo "  ██║     ██║   ██║██╔══██╗██║  ██║██╔══██╗██║  ██║██║     ██╔══██╗ "
+echo "  ██║     ██║   ██║██████╔╝███████║███████║███████║██║     ███████║ "
+echo "  ██║     ██║   ██║██╔═══╝ ██╔══██║██╔══██║██╔══██║██║     ██╔══██║ "
+echo "  ███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║ "
+echo "  ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ "
 echo -e "${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}                 H O S T   S C A N${RESET}"
-echo -e "${CYAN}              Luphahla Host Scan${RESET}"
-echo -e "${DIM}        Online • Offline • Wi-Fi • Mobile${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}            G L O B A L   H O S T   S C A N     🌍${RESET}"
+echo -e "${CYAN}               Luphahla Host Scan - Auto Verify${RESET}"
+echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
+echo -e "  ${YELLOW}Zimbabwe${RESET} • ${GREEN}Africa${RESET} • ${BLUE}Americas${RESET} • ${MAGENTA}Europe${RESET} • ${CYAN}Asia${RESET}"
+echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
 echo ""
 
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${WHITE}  Scan started: ${CYAN}$(date)${RESET}"
-echo -e "${WHITE}  Timeout:      ${CYAN}${TIMEOUT}s${RESET}"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo ""
-
-# ---- Dependency check ----
-MISSING=()
-
-for cmd in ping ip openssl timeout sort wc grep stat cp cat tee nl; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    MISSING+=("$cmd")
+# ---------- Network check ----------
+ONLINE=false
+if command -v ping >/dev/null; then
+  if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    ONLINE=true
+  elif ping -c 1 -t 2 8.8.8.8 >/dev/null 2>&1; then
+    ONLINE=true
   fi
-done
-
-if [ "${#MISSING[@]}" -gt 0 ]; then
-  echo -e "${RED}${BOLD}[!] Missing dependencies:${RESET}"
-  printf '  %s\n' "${MISSING[@]}"
-  echo ""
-  echo -e "${YELLOW}Install the missing Termux packages before running the scanner.${RESET}"
-  exit 1
 fi
 
-echo -e "${GREEN}${BOLD}[✓]${RESET} Dependencies: ${GREEN}OK${RESET}"
-echo ""
-
-# ---- Check network status ----
-if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-  echo -e "${GREEN}${BOLD}[+]${RESET} Network: ${GREEN}ONLINE${RESET}"
-  ONLINE=true
+if [ "$ONLINE" = true ]; then
+  echo -e "  ${GREEN}${BOLD}✓${RESET} ${GREEN}Network: ONLINE${RESET}"
 else
-  echo -e "${YELLOW}${BOLD}[!]${RESET} Network: ${YELLOW}OFFLINE (no internet)${RESET}"
-  ONLINE=false
+  echo -e "  ${RED}${BOLD}✗${RESET} ${RED}Network: OFFLINE${RESET}"
 fi
 
-# Detect current interface
-if ip route | grep -q wlan; then
-  MODE="Wi-Fi"
-elif ip route | grep -q "ccmni\|rmnet\|wwan"; then
-  MODE="Mobile Data"
-else
-  MODE="Unknown"
-fi
-
-echo -e "${BLUE}${BOLD}[+]${RESET} Interface: ${CYAN}$MODE${RESET}"
+# ---------- Build GLOBAL host list ----------
 echo ""
+echo -e "${BRIGHT_BLUE}${BOLD}  ── Building Global Target List ──${RESET}"
 
-# ---- OFFLINE MODE ----
-if [ "$ONLINE" = false ]; then
-  echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-  echo -e "${BRIGHT_BLUE}${BOLD}  OFFLINE MODE${RESET}"
-  echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+if [ -n "$HOSTS_FILE" ] && [ -f "$HOSTS_FILE" ]; then
+  cp "$HOSTS_FILE" "$FRESH_FILE"
+  echo -e "  ${CYAN}●${RESET} Using custom host list: ${BRIGHT_WHITE}$HOSTS_FILE${RESET}"
+elif [ "$ONLINE" = true ]; then
+  # ================================================================
+  # FULL MASSIVE GLOBAL LIST (UNTRUNCATED)
+  # ================================================================
+  cat > "$FRESH_FILE" << 'EOF'
+# ====================================================
+# ZIMBABWE - ECONET, NETONE, TELECEL, LIQUID, BANKS
+# ====================================================
+econet.co.zw
+www.econet.co.zw
+mms.econet.co.zw
+messaging.econet.co.zw
+ecocash.co.zw
+www.ecocash.co.zw
+api.ecocash.co.zw
+netone.co.zw
+www.netone.co.zw
+onemoney.co.zw
+www.onemoney.co.zw
+telecel.co.zw
+www.telecel.co.zw
+liquid.co.zw
+www.liquidtelecom.com
+liquid.africa
+potraz.gov.zw
+zimpost.co.zw
+cabs.co.zw
+www.cabs.co.zw
+stewardbank.co.zw
+www.stewardbank.co.zw
+fbc.co.zw
+www.fbc.co.zw
+herald.co.zw
+newsday.co.zw
+chronicle.co.zw
+technomag.co.zw
+zbc.co.zw
+www.zbc.co.zw
 
-  if [ -f "$CACHE" ]; then
-    CACHE_DATE=$(stat -c %y "$CACHE" 2>/dev/null | cut -d. -f1)
+# ====================================================
+# AFRICA (MTN, VODACOM, SAFARICOM, ORANGE, AIRTEL)
+# ====================================================
+mtn.co.za
+www.mtn.co.za
+vodacom.co.za
+www.vodacom.co.za
+cellc.co.za
+www.cellc.co.za
+telkom.co.za
+www.telkom.co.za
+safaricom.co.ke
+www.safaricom.co.ke
+airtel.africa
+www.airtel.africa
+orange.sn
+www.orange.sn
+africastalking.com
+www.africastalking.com
+mybroadband.co.za
+www.mybroadband.co.za
+standardbank.co.za
+www.standardbank.co.za
+absa.co.za
+www.absa.co.za
+capitecbank.co.za
+www.capitecbank.co.za
+equitybank.co.ke
+www.equitybank.co.ke
+kcb.co.ke
+www.kcb.co.ke
 
-    echo -e "${CYAN}[*]${RESET} Using cached host list ${DIM}(last online: $CACHE_DATE)${RESET}"
-
-    cp "$CACHE" "$LIST"
-
-    echo -e "${GREEN}[✓]${RESET} Loaded from cache → ${CYAN}$LIST${RESET}"
-    cat "$LIST"
-
-  elif [ -f "$LIST" ]; then
-    echo -e "${YELLOW}[!]${RESET} No cache, but ${CYAN}$LIST${RESET} exists from a previous run"
-    cat "$LIST"
-
-  else
-    echo -e "${RED}[!]${RESET} No cached or saved hosts found. Run again when online."
-  fi
-
-  exit 0
-fi
-
-# ---- ONLINE MODE ----
-
-cat > "$TDIR/fresh_sni.txt" << 'UNIVERSAL'
-# Google infrastructure (works on everything)
-mtalk.google.com
-alt1.mtalk.google.com
-alt2.mtalk.google.com
-alt3.mtalk.google.com
-alt4.mtalk.google.com
-alt5.mtalk.google.com
-alt6.mtalk.google.com
-alt7.mtalk.google.com
-alt8.mtalk.google.com
-client1.google.com
-client2.google.com
-client3.google.com
-client4.google.com
-client5.google.com
+# ====================================================
+# NORTH AMERICA (US/Canada - Google, Meta, MS, Amazon)
+# ====================================================
 google.com
 www.google.com
 mail.google.com
@@ -203,28 +212,44 @@ android.googleapis.com
 play.googleapis.com
 update.googleapis.com
 connectivitycheck.gstatic.com
-connectivitycheck.platform.googleapis.com
-firebase-settings.crashlytics.com
 googleapis.com
 www.googleapis.com
 youtube.com
 www.youtube.com
 m.youtube.com
 youtu.be
-google-analytics.com
-ssl.google-analytics.com
-googletagmanager.com
 googlevideo.com
 ggpht.com
 googleusercontent.com
 googleadservices.com
-googleads.g.doubleclick.net
-pagead2.googlesyndication.com
-tpc.googlesyndication.com
-doubleclick.net
-goo.gl
-g.co
-# Apple
+facebook.com
+www.facebook.com
+m.facebook.com
+connect.facebook.com
+graph.facebook.com
+instagram.com
+www.instagram.com
+cdninstagram.com
+whatsapp.com
+www.whatsapp.com
+api.whatsapp.com
+microsoft.com
+www.microsoft.com
+live.com
+login.live.com
+outlook.com
+office.com
+azure.com
+windowsupdate.com
+update.microsoft.com
+amazon.com
+www.amazon.com
+aws.amazon.com
+amazonaws.com
+cloudfront.net
+netflix.com
+www.netflix.com
+cdn.netflix.com
 apple.com
 www.apple.com
 apps.apple.com
@@ -235,266 +260,261 @@ swscan.apple.com
 mesu.apple.com
 ocsp.apple.com
 captive.apple.com
-gs.apple.com
-# Meta/Facebook
-facebook.com
-www.facebook.com
-m.facebook.com
-connect.facebook.com
-graph.facebook.com
-api.facebook.com
-facebook.net
-fbcdn.net
-fbsbx.com
-whatsapp.com
-www.whatsapp.com
-api.whatsapp.com
-whatsapp.net
-instagram.com
-www.instagram.com
-cdninstagram.com
-# Microsoft
-microsoft.com
-www.microsoft.com
-live.com
-login.live.com
-outlook.com
-office.com
-azure.com
-windowsupdate.com
-update.microsoft.com
-# Cloudflare/General
-gn.total.com
-www.mango4g.com
-info.chunhomall.com
-one.one.one.one
-cloudflare-dns.com
-1.1.1.1
-# Android
-android.com
-www.android.com
-play.google.com
-support.google.com
-market.android.com
-developer.android.com
-UNIVERSAL
-
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}  NETWORK PROFILE${RESET}"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${CYAN}[*]${RESET} Detected: ${YELLOW}$MODE${RESET} — adding ISP-specific hosts..."
-
-case "$MODE" in
-  *Wi-Fi*)
-    cat >> "$TDIR/fresh_sni.txt" << 'WIFI'
-amazon.com
-www.amazon.com
-aws.amazon.com
-amazonaws.com
-cloudfront.net
-netflix.com
-www.netflix.com
-cdn.netflix.com
 spotify.com
+www.spotify.com
 spotifycdn.com
-twitch.tv
 github.com
 raw.githubusercontent.com
 stackoverflow.com
 reddit.com
-twitter.com
 x.com
+twitter.com
 t.co
-pinterest.com
 linkedin.com
+www.linkedin.com
+adobe.com
+www.adobe.com
+salesforce.com
+www.salesforce.com
+slack.com
+www.slack.com
+zoom.us
+www.zoom.us
+
+# ====================================================
+# EUROPE (UK, Germany, France, Netherlands)
+# ====================================================
+bbc.co.uk
+www.bbc.co.uk
+bbc.com
+www.bbc.com
+deutsche-bank.de
+www.deutsche-bank.de
+sap.com
+www.sap.com
+siemens.com
+www.siemens.com
+zalando.de
+www.zalando.de
+bp.com
+www.bp.com
+vodafone.com
+www.vodafone.com
+vodafone.co.uk
+www.vodafone.co.uk
+sky.com
+www.sky.com
+ft.com
+www.ft.com
+reuters.com
+www.reuters.com
+nginx.com
+www.nginx.com
+
+# ====================================================
+# ASIA / PACIFIC (China, Japan, India, Australia)
+# ====================================================
+baidu.com
+www.baidu.com
+alibaba.com
+www.alibaba.com
+tencent.com
+www.tencent.com
+qq.com
+www.qq.com
+yahoo.co.jp
+www.yahoo.co.jp
+naver.com
+www.naver.com
+line.me
+www.line.me
+shopee.sg
+www.shopee.sg
+tokopedia.com
+www.tokopedia.com
+flipkart.com
+www.flipkart.com
+paytm.com
+www.paytm.com
+telstra.com.au
+www.telstra.com.au
+optus.com.au
+www.optus.com.au
+abc.net.au
+www.abc.net.au
+airtel.in
+www.airtel.in
+jio.com
+www.jio.com
+
+# ====================================================
+# SOUTH AMERICA
+# ====================================================
+globo.com
+www.globo.com
+uol.com.br
+www.uol.com.br
+mercadolivre.com.br
+www.mercadolivre.com.br
+mercadolibre.com
+www.mercadolibre.com
+claro.com.br
+www.claro.com.br
+
+# ====================================================
+# CDNs / CLOUD PROVIDERS / PUBLIC RESOLVERS
+# ====================================================
+one.one.one.one
+cloudflare-dns.com
+1.1.1.1
+quad9.net
+opendns.com
+akamaiedge.net
+fastly.net
+cdn77.net
+b-cdn.net
+edgecastcdn.net
+stackpathcdn.com
+azureedge.net
 cloudflare.com
 www.cloudflare.com
-WIFI
-    ;;
-  *Mobile*)
-    cat >> "$TDIR/fresh_sni.txt" << 'MOBILE'
-# Zim ISP first-party
-econet.co.zw
-www.econet.co.zw
-mms.econet.co.zw
-messaging.econet.co.zw
-onai.co.zw
-netone.co.zw
-www.netone.co.zw
-onemoney.co.zw
-www.onemoney.co.zw
-telecel.co.zw
-www.telecel.co.zw
-liquid.co.zw
-www.liquidtelecom.com
-potraz.gov.zw
-zimpost.co.zw
-# CDNs that pass through Zim ISPs
-auth.mtn.cm
-smscloud.mtn.ci
-log.postmaster.apple.com
-sandbox.itunes.apple.com
-firestore.googleapis.com
-firebaseremoteconfig.googleapis.com
-firebaseinstallations.googleapis.com
-app-measurement.com
-MOBILE
-    ;;
-esac
+EOF
+  # ================================================================
+  # END OF FULL GLOBAL LIST
+  # ================================================================
 
-# ---- Merge existing list ----
-if [ -f "$LIST" ]; then
-  cat "$LIST" >> "$TDIR/fresh_sni.txt"
-fi
-
-sort -u "$TDIR/fresh_sni.txt" -o "$TDIR/fresh_sni.txt"
-
-# Count actual hosts, excluding comments and blank lines
-TOTAL=$(grep -vE '^[[:space:]]*(#|$)' "$TDIR/fresh_sni.txt" | wc -l)
-
-if [ "$TOTAL" -eq 0 ]; then
-  echo -e "${RED}[!] No valid hosts found.${RESET}"
+  echo -e "  ${CYAN}●${RESET} Generated ${BRIGHT_WHITE}global${RESET} target list (full)."
+elif [ -f "$CACHE_FILE" ]; then
+  cp "$CACHE_FILE" "$FRESH_FILE"
+  CACHE_DATE=$(_get_mtime "$CACHE_FILE")
+  echo -e "  ${YELLOW}●${RESET} Using cached list ${DIM}(last online: $CACHE_DATE)${RESET}"
+elif [ -f "$OUTPUT_FILE" ]; then
+  cp "$OUTPUT_FILE" "$FRESH_FILE"
+  echo -e "  ${YELLOW}●${RESET} Using existing output file: ${BRIGHT_WHITE}$OUTPUT_FILE${RESET}"
+else
+  echo -e "  ${RED}✗ No hosts available. Run online first.${RESET}" >&2
   exit 3
 fi
 
-echo ""
-echo -e "${GREEN}${BOLD}[+]${RESET} Total candidates: ${CYAN}$TOTAL${RESET}"
+# Merge and sort
+if [ -f "$OUTPUT_FILE" ]; then
+  cat "$OUTPUT_FILE" >> "$FRESH_FILE"
+fi
+sort -u "$FRESH_FILE" -o "$FRESH_FILE"
+
+TOTAL=$(grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" | wc -l)
+if [ "$TOTAL" -eq 0 ]; then
+  echo -e "  ${RED}✗ No valid hosts found.${RESET}" >&2
+  exit 3
+fi
+echo -e "  ${GREEN}✓${RESET} Total Global Candidates: ${BRIGHT_CYAN}$TOTAL${RESET}"
 echo ""
 
-# ---- TLS verification helper ----
+# ---------- TLS check function ----------
 check_tls() {
   local host="$1"
   local port="$2"
-
   if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    timeout "$TIMEOUT" openssl s_client \
-      -connect "$host:$port" \
-      -verify_return_error \
-      -verify_ip "$host" \
-      -verify_quiet \
-      -brief \
-      -no_ign_eof \
-      </dev/null >/dev/null 2>&1
+    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -verify_return_error -verify_ip "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1
   else
-    timeout "$TIMEOUT" openssl s_client \
-      -connect "$host:$port" \
-      -servername "$host" \
-      -verify_return_error \
-      -verify_hostname "$host" \
-      -verify_quiet \
-      -brief \
-      -no_ign_eof \
-      </dev/null >/dev/null 2>&1
+    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1
   fi
 }
+export -f check_tls _timeout
+export TIMEOUT
 
-# ---- Verify 443 ----
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}  TLS VERIFICATION • PORT 443${RESET}"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-
-LIVE_FILE="$TDIR/live.txt"
-: > "$LIVE_FILE"
-
-COUNT=0
-CHECKED=0
-
-while IFS= read -r host; do
-  [[ "$host" =~ ^[[:space:]]*# ]] && continue
-  [ -z "$host" ] && continue
-
-  COUNT=$((COUNT + 1))
-
-  echo -ne "\r${CYAN}[*]${RESET} ${WHITE}$COUNT/$TOTAL${RESET} — ${CYAN}$host${RESET}...   "
-
-  if check_tls "$host" 443; then
-    echo ""
-    echo -e "  ${GREEN}${BOLD}✓${RESET} ${GREEN}$host:443${RESET}"
-    printf '%s\n' "$host" >> "$LIVE_FILE"
+# ---------- Parallel verification (fast) ----------
+parallel_check() {
+  local port="$1"
+  local tmp_live="$TDIR/live_${port}.txt"
+  : > "$tmp_live"
+  
+  echo -e "${BRIGHT_BLUE}${BOLD}  ── TLS Checking Port ${port} (Global) ──${RESET}"
+  echo -e "  ${DIM}Scanning $TOTAL hosts in parallel (${PARALLEL} jobs)...${RESET}"
+  
+  # Use xargs -P for maximum speed
+  if command -v xargs >/dev/null && xargs --help 2>&1 | grep -q -- '-P'; then
+    grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" | \
+      xargs -P "$PARALLEL" -I {} bash -c '
+        if check_tls "$1" '"$port"'; then
+          echo "$1"
+        fi
+      ' _ {} >> "$tmp_live" 2>/dev/null &
+    
+    # Show a spinner while xargs runs in background
+    local pid=$!
+    local spin='⣾⣽⣻⢿⡿⣟⣯⣷'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+      printf "\r  ${CYAN}${spin:i++%${#spin}:1}${RESET} Scanning in progress..."
+      sleep 0.1
+    done
+    wait "$pid"
+    printf "\r  ${GREEN}✓${RESET} Scan complete.                    \n"
+  else
+    # Fallback to sequential if no xargs -P
+    echo -e "  ${YELLOW}⚠${RESET} Parallel not available – using sequential (slower)."
+    while IFS= read -r host; do
+      [[ "$host" =~ ^[[:space:]]*# ]] && continue
+      [ -z "$host" ] && continue
+      if check_tls "$host" "$port"; then
+        echo "$host" >> "$tmp_live"
+      fi
+    done < "$FRESH_FILE"
   fi
+  
+  sort -u "$tmp_live" -o "$tmp_live"
+  cat "$tmp_live" >> "$LIVE_FILE"
+}
 
-  CHECKED=$COUNT
-done < "$TDIR/fresh_sni.txt"
+# ---------- Run checks ----------
+parallel_check 443
+parallel_check 8080
 
-# ---- Check 8080 ----
-echo ""
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}  SECONDARY TLS CHECK • PORT 8080${RESET}"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-
-while IFS= read -r host; do
-  [[ "$host" =~ ^[[:space:]]*# ]] && continue
-  [ -z "$host" ] && continue
-
-  if grep -Fxq "$host" "$LIVE_FILE"; then
-    continue
-  fi
-
-  echo -ne "\r${CYAN}[*]${RESET} 8080 — ${CYAN}$host${RESET}...   "
-
-  if check_tls "$host" 8080; then
-    echo ""
-    echo -e "  ${GREEN}${BOLD}✓${RESET} ${GREEN}$host:8080${RESET}"
-    printf '%s\n' "$host" >> "$LIVE_FILE"
-  fi
-done < "$TDIR/fresh_sni.txt"
-
-# ---- Save results ----
+# ---------- Finalize results ----------
 sort -u "$LIVE_FILE" -o "$LIVE_FILE"
-
 LIVECOUNT=$(grep -cve '^[[:space:]]*$' "$LIVE_FILE" 2>/dev/null || echo 0)
-
-if [ "$LIVECOUNT" -gt 0 ]; then
-  cp "$LIVE_FILE" "$LIST"
-else
-  : > "$LIST"
-fi
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
+# ---------- Beautiful Summary Box ----------
 echo ""
-echo -e "${BRIGHT_BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${BRIGHT_RED}${BOLD}                 SCAN SUMMARY${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "  ${CYAN}Candidates:${RESET} $TOTAL"
-echo -e "  ${CYAN}Checked:${RESET}    $CHECKED"
-echo -e "  ${CYAN}Live:${RESET}       ${GREEN}$LIVECOUNT${RESET}"
-echo -e "  ${CYAN}Mode:${RESET}       $MODE"
-echo -e "  ${CYAN}Duration:${RESET}   ${DURATION}s"
-echo -e "  ${CYAN}Time:${RESET}       $(date)"
-echo -e "${BRIGHT_BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╔═══════════════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║            G L O B A L   S U M M A R Y            ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╚═══════════════════════════════════════════════════╝${RESET}"
+echo -e "  ${CYAN}●${RESET} Candidates:  ${BRIGHT_WHITE}$TOTAL${RESET}"
+echo -e "  ${CYAN}●${RESET} Live:         ${BRIGHT_GREEN}$LIVECOUNT${RESET}"
+echo -e "  ${CYAN}●${RESET} Duration:     ${BRIGHT_YELLOW}${DURATION}s${RESET}"
 
+# ---------- Show sample of live hosts ----------
 if [ "$LIVECOUNT" -gt 0 ]; then
   echo ""
-  cat "$LIST"
-
-  echo ""
-  echo -e "${GREEN}${BOLD}[✓]${RESET} Saved to ${CYAN}$LIST${RESET} ($LIVECOUNT hosts)"
-
-  cp "$LIST" "$CACHE"
-  echo -e "${GREEN}${BOLD}[✓]${RESET} Cached for offline use → ${CYAN}$CACHE${RESET}"
-
-  if command -v termux-clipboard-set >/dev/null 2>&1; then
-    head -5 "$LIST" | termux-clipboard-set
-    echo -e "${GREEN}${BOLD}[✓]${RESET} Top hosts copied to clipboard"
+  echo -e "${BRIGHT_CYAN}${BOLD}  ── Live Hosts (Top 10) ──${RESET}"
+  head -10 "$LIVE_FILE" | nl -w2 -s'. ' | while read -r line; do
+    echo -e "  ${GREEN}✓${RESET} ${WHITE}$line${RESET}"
+  done
+  if [ "$LIVECOUNT" -gt 10 ]; then
+    echo -e "  ${DIM}... and $(($LIVECOUNT - 10)) more.${RESET}"
   fi
-
-  echo ""
-  echo -e "${BRIGHT_BLUE}${BOLD}  QUICK PICK${RESET}"
-  echo -e "${BLUE}  ─────────────────────────────${RESET}"
-  nl -ba "$LIST" | head -10
-
 else
-  echo ""
-  echo -e "${YELLOW}[!]${RESET} No hosts passed TLS verification."
-  echo -e "${YELLOW}[!]${RESET} Existing cache was not replaced."
+  echo -e "  ${YELLOW}${BOLD}⚠${RESET} ${YELLOW}No live hosts found globally.${RESET}"
+fi
+
+# ---------- Save output and cache ----------
+echo ""
+if [ "$LIVECOUNT" -gt 0 ]; then
+  cp "$LIVE_FILE" "$OUTPUT_FILE"
+  cp "$LIVE_FILE" "$CACHE_FILE"
+  echo -e "  ${GREEN}✓${RESET} ${GREEN}Saved${RESET} ${BRIGHT_CYAN}$LIVECOUNT${RESET} ${GREEN}hosts to${RESET} ${BRIGHT_WHITE}$OUTPUT_FILE${RESET}"
+  echo -e "  ${GREEN}✓${RESET} ${GREEN}Cached for offline use at${RESET} ${BRIGHT_WHITE}$CACHE_FILE${RESET}"
+else
+  echo -e "  ${YELLOW}⚠${RESET} ${YELLOW}Existing output unchanged.${RESET}"
 fi
 
 echo ""
-echo -e "${BRIGHT_RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}          LUPHAHLA HOST SCAN COMPLETE${RESET}"
-echo -e "${BRIGHT_RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "${BRIGHT_MAGENTA}${BOLD}  ╔═══════════════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_MAGENTA}${BOLD}  ║        LUPHAHLA GLOBAL SCAN COMPLETE             ║${RESET}"
+echo -e "${BRIGHT_MAGENTA}${BOLD}  ╚═══════════════════════════════════════════════════╝${RESET}"
 echo ""
-
 exit 0
