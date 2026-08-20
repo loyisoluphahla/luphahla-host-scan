@@ -1,0 +1,17 @@
+# OS junk
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+*.swp
+*.swo
+*~
+
+# Script outputs (if any)
+/output/
+/results/
+.env
+
+# Termux / local backups
+.bash_history
+*.bak
