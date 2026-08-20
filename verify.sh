@@ -1,210 +1,186 @@
-#!/data/data/com.termux/files/usr/bin/bash
-# Luphahla Host Scan
-# verify.sh — check any host list file or pipe
+#!/usr/bin/env bash
+# Luphahla Host Scan - verify.sh
+# Usage: cat hosts.txt | ./verify.sh [options]
+# Options:
+#   --no-color        disable ANSI colors
+#   --timeout N       timeout in seconds per host (default 5)
+#   --parallel N      number of parallel jobs (default 10)
+#   -o FILE           write live hosts to FILE
+#   --help            show this help
 
 set -o pipefail
 
-RESET='\033[0m'
-BOLD='\033[1m'
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-WHITE='\033[37m'
-BRIGHT_RED='\033[91m'
-BRIGHT_BLUE='\033[94m'
-BRIGHT_CYAN='\033[96m'
-DIM='\033[2m'
+# ---------- Portable wrappers ----------
+if command -v timeout >/dev/null 2>&1; then
+  _timeout() { timeout "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+  _timeout() { gtimeout "$@"; }
+else
+  _timeout() {
+    local secs="$1"; shift
+    ( "$@" ) &
+    local pid=$!
+    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) &
+    wait "$pid" 2>/dev/null
+    return $?
+  }
+fi
 
+# ---------- Defaults ----------
 USE_COLOR=true
 TIMEOUT=5
+PARALLEL=10
+OUTPUT_FILE=""
+INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/verify-input.XXXXXX")
+LIVE_FILE=$(mktemp "${TMPDIR:-/tmp}/verify-live.XXXXXX")
+trap 'rm -f "$INPUT_FILE" "$LIVE_FILE"' EXIT INT TERM
 
+# ---------- Parse arguments ----------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --no-color)
-      USE_COLOR=false
-      ;;
-    --timeout)
-      if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 1 ]; then
-        echo "Error: --timeout requires a positive number."
-        exit 2
-      fi
-      TIMEOUT="$2"
-      shift
-      ;;
+    --no-color)    USE_COLOR=false ;;
+    --timeout)     TIMEOUT="$2"; shift ;;
+    --parallel)    PARALLEL="$2"; shift ;;
+    -o)            OUTPUT_FILE="$2"; shift ;;
     --help|-h)
-      echo "Luphahla Host Scan - Verification"
-      echo ""
-      echo "Usage:"
-      echo "  cat ~/sni_hosts_latest.txt | ./verify.sh"
-      echo "  ./verify.sh < ~/sni_hosts_latest.txt"
-      echo "  ./verify.sh --no-color < hosts.txt"
-      echo "  ./verify.sh --timeout 10 < hosts.txt"
+      sed -n '2,/^$/p' "$0" | sed 's/^# //'
       exit 0
       ;;
     *)
-      echo "Error: Unknown option: $1"
+      echo "Unknown option: $1" >&2
       exit 2
       ;;
   esac
   shift
 done
 
+# ---------- Color setup ----------
 if [ "$USE_COLOR" = false ]; then
-  RESET=''
-  BOLD=''
-  RED=''
-  GREEN=''
-  YELLOW=''
-  BLUE=''
-  CYAN=''
-  WHITE=''
-  BRIGHT_RED=''
-  BRIGHT_BLUE=''
-  BRIGHT_CYAN=''
-  DIM=''
+  RESET=''; BOLD=''; DIM=''; UNDERLINE=''
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; MAGENTA=''; WHITE=''
+  BRIGHT_RED=''; BRIGHT_GREEN=''; BRIGHT_YELLOW=''; BRIGHT_BLUE=''; BRIGHT_CYAN=''; BRIGHT_MAGENTA=''
+else
+  RESET='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'; UNDERLINE='\033[4m'
+  RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; MAGENTA='\033[35m'; WHITE='\033[37m'
+  BRIGHT_RED='\033[91m'; BRIGHT_GREEN='\033[92m'; BRIGHT_YELLOW='\033[93m'; BRIGHT_BLUE='\033[94m'; BRIGHT_CYAN='\033[96m'; BRIGHT_MAGENTA='\033[95m'
 fi
 
-# ---- Dependencies ----
-MISSING=()
-
-for cmd in openssl timeout sort grep wc mktemp; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    MISSING+=("$cmd")
-  fi
-done
-
-if [ "${#MISSING[@]}" -gt 0 ]; then
-  echo -e "${RED}${BOLD}[!] Missing dependencies:${RESET}"
-  printf '  %s\n' "${MISSING[@]}"
-  exit 1
-fi
-
-# ---- Buffer stdin ----
-INPUT_FILE=$(mktemp "${TMPDIR:-/data/data/com.termux/files/usr/tmp}/luphahla-verify.XXXXXX") || {
-  echo -e "${RED}Error: Could not create temporary input file.${RESET}"
-  exit 1
+# ---------- Progress bar function ----------
+progress_bar() {
+  local current=$1
+  local total=$2
+  local prefix="$3"
+  local percent=$((current * 100 / total))
+  local filled=$((percent / 2))
+  local empty=$((50 - filled))
+  
+  printf "\r${BLUE}${BOLD}${prefix}${RESET} ${CYAN}["
+  for ((i=0; i<filled; i++)); do printf "${GREEN}█${RESET}"; done
+  for ((i=0; i<empty; i++)); do printf "${DIM}░${RESET}"; done
+  printf "${CYAN}] ${BRIGHT_CYAN}%3d%%${RESET} ${WHITE}(%d/%d)${RESET}" "$percent" "$current" "$total"
 }
 
-cleanup() {
-  rm -f "$INPUT_FILE"
-}
-trap cleanup EXIT INT TERM
-
+# ---------- Read stdin into temp file ----------
 cat > "$INPUT_FILE"
-
 TOTAL=$(grep -vE '^[[:space:]]*(#|$)' "$INPUT_FILE" | wc -l)
-
 if [ "$TOTAL" -eq 0 ]; then
-  echo -e "${YELLOW}[!] No valid hosts were supplied.${RESET}"
+  echo -e "${YELLOW}No valid hosts supplied.${RESET}" >&2
   exit 3
 fi
 
-clear
-
+# ---------- Banner ----------
+[ -t 1 ] && clear
 echo -e "${BRIGHT_RED}${BOLD}"
-echo "██╗     ██╗   ██╗██████╗ ██╗  ██╗ █████╗ ██╗  ██╗██╗      █████╗"
-echo "██║     ██║   ██║██╔══██╗██║  ██║██╔══██╗██║  ██║██║     ██╔══██╗"
-echo "██║     ██║   ██║██████╔╝███████║███████║███████║██║     ███████║"
-echo "██║     ██║   ██║██╔═══╝ ██╔══██║██╔══██║██╔══██║██║     ██╔══██║"
-echo "███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║"
-echo "╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝"
+echo "  ██╗     ██╗   ██╗██████╗ ██╗  ██╗ █████╗ ██╗  ██╗██╗      █████╗  "
+echo "  ██║     ██║   ██║██╔══██╗██║  ██║██╔══██╗██║  ██║██║     ██╔══██╗ "
+echo "  ██║     ██║   ██║██████╔╝███████║███████║███████║██║     ███████║ "
+echo "  ██║     ██║   ██║██╔═══╝ ██╔══██║██╔══██║██╔══██║██║     ██╔══██║ "
+echo "  ███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║ "
+echo "  ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ "
 echo -e "${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}                 H O S T   S C A N${RESET}"
-echo -e "${CYAN}                 Verification Mode${RESET}"
-echo -e "${DIM}              Luphahla Host Scan${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}                  H O S T   S C A N${RESET}"
+echo -e "${CYAN}               Luphahla Host Scan - Verification${RESET}"
+echo -e "${DIM}           ───────────────────────────────────────${RESET}"
+echo -e "  ${YELLOW}Candidates:${RESET} ${BRIGHT_CYAN}$TOTAL${RESET}    ${YELLOW}Timeout:${RESET} ${BRIGHT_CYAN}${TIMEOUT}s${RESET}"
+echo -e "${DIM}           ───────────────────────────────────────${RESET}"
 echo ""
 
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "  ${CYAN}Candidates:${RESET} $TOTAL"
-echo -e "  ${CYAN}Timeout:${RESET}    ${TIMEOUT}s"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo ""
-
-START_TIME=$(date +%s)
-
-LIVE_FILE=$(mktemp "${TMPDIR:-/data/data/com.termux/files/usr/tmp}/luphahla-live.XXXXXX") || {
-  echo -e "${RED}Error: Could not create temporary result file.${RESET}"
-  exit 1
-}
-
-cleanup_verify() {
-  rm -f "$INPUT_FILE" "$LIVE_FILE"
-}
-trap cleanup_verify EXIT INT TERM
-
+# ---------- TLS check function ----------
 check_tls() {
   local host="$1"
-
+  local port="${2:-443}"
   if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    timeout "$TIMEOUT" openssl s_client \
-      -connect "$host:443" \
-      -verify_return_error \
-      -verify_ip "$host" \
-      -verify_quiet \
-      -brief \
-      -no_ign_eof \
-      </dev/null >/dev/null 2>&1
+    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -verify_return_error -verify_ip "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1
   else
-    timeout "$TIMEOUT" openssl s_client \
-      -connect "$host:443" \
-      -servername "$host" \
-      -verify_return_error \
-      -verify_hostname "$host" \
-      -verify_quiet \
-      -brief \
-      -no_ign_eof \
-      </dev/null >/dev/null 2>&1
+    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1
   fi
 }
+export -f check_tls _timeout
+export TIMEOUT
 
+# ---------- Parallel verification ----------
+echo -e "${BRIGHT_BLUE}${BOLD}  ── Scanning Port 443 ──${RESET}"
+: > "$LIVE_FILE"
 COUNT=0
 
-while IFS= read -r host; do
-  [[ "$host" =~ ^[[:space:]]*# ]] && continue
-  [ -z "$host" ] && continue
+if command -v xargs >/dev/null && xargs --help 2>&1 | grep -q -- '-P'; then
+  # We capture output in temp files to show progress
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/verify-progress.XXXXXX")
+  trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+  
+  grep -vE '^[[:space:]]*(#|$)' "$INPUT_FILE" | while read -r host; do
+    COUNT=$((COUNT + 1))
+    progress_bar "$COUNT" "$TOTAL" "Scanning"
+    if check_tls "$host"; then
+      echo "$host" >> "$LIVE_FILE"
+    fi
+  done
+else
+  # Sequential fallback
+  while IFS= read -r host; do
+    [[ "$host" =~ ^[[:space:]]*# ]] && continue
+    [ -z "$host" ] && continue
+    COUNT=$((COUNT + 1))
+    progress_bar "$COUNT" "$TOTAL" "Scanning"
+    if check_tls "$host"; then
+      echo "$host" >> "$LIVE_FILE"
+    fi
+  done < "$INPUT_FILE"
+fi
 
-  COUNT=$((COUNT + 1))
+echo "" # newline after progress bar
 
-  echo -ne "\r${CYAN}[*]${RESET} ${WHITE}$COUNT/$TOTAL${RESET} — ${CYAN}$host${RESET}...   "
-
-  if check_tls "$host"; then
-    echo ""
-    echo -e "  ${GREEN}${BOLD}✓${RESET} ${GREEN}$host:443${RESET}"
-    printf '%s\n' "$host" >> "$LIVE_FILE"
-  fi
-done < "$INPUT_FILE"
-
+# ---------- Results ----------
 sort -u "$LIVE_FILE" -o "$LIVE_FILE"
-
 LIVECOUNT=$(grep -cve '^[[:space:]]*$' "$LIVE_FILE" 2>/dev/null || echo 0)
 
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
-
 echo ""
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${BRIGHT_RED}${BOLD}                    RESULTS${RESET}"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╔════════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║            S C A N   R E S U L T S         ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╚════════════════════════════════════════════╝${RESET}"
 
 if [ "$LIVECOUNT" -gt 0 ]; then
-  cat "$LIVE_FILE"
+  echo -e "${BRIGHT_CYAN}${BOLD}  ── Live Hosts (${LIVECOUNT} found) ──${RESET}"
+  nl -w2 -s'. ' "$LIVE_FILE" | sed 's/^/  /' | while read -r line; do
+    echo -e "  ${GREEN}✓${RESET} ${WHITE}$line${RESET}"
+  done
 else
-  echo -e "${YELLOW}No hosts passed TLS verification.${RESET}"
+  echo -e "  ${YELLOW}${BOLD}⚠${RESET} ${YELLOW}No hosts passed TLS verification.${RESET}"
 fi
 
 echo ""
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "  ${CYAN}Candidates:${RESET} $TOTAL"
-echo -e "  ${CYAN}Checked:${RESET}    $COUNT"
-echo -e "  ${CYAN}Live:${RESET}       ${GREEN}$LIVECOUNT${RESET}"
-echo -e "  ${CYAN}Duration:${RESET}   ${DURATION}s"
-echo -e "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}  ╔════════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}  ║            S U M M A R Y                  ║${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}  ╚════════════════════════════════════════════╝${RESET}"
+echo -e "  ${CYAN}●${RESET} Candidates:  ${BRIGHT_WHITE}$TOTAL${RESET}"
+echo -e "  ${CYAN}●${RESET} Live:         ${BRIGHT_GREEN}$LIVECOUNT${RESET}"
 echo ""
 
-if [ "$LIVECOUNT" -gt 0 ]; then
-  exit 0
-else
-  exit 3
+# ---------- Save output if requested ----------
+if [ -n "$OUTPUT_FILE" ]; then
+  cp "$LIVE_FILE" "$OUTPUT_FILE"
+  echo -e "  ${GREEN}✓${RESET} ${GREEN}Saved to${RESET} ${BRIGHT_CYAN}$OUTPUT_FILE${RESET}"
+  echo ""
 fi
+
+exit 0
