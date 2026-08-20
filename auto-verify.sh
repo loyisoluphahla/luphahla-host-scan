@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# Luphahla Host Scan - auto-verify.sh (GLOBAL)
-# Automatically builds a GLOBAL host list and verifies TLS in parallel.
-# Options:
-#   --no-color        disable colors
-#   --timeout N       timeout per host (default 5)
-#   --parallel N      parallel jobs (default 30)
-#   --hosts-file FILE use custom host list instead of built-in
-#   -o FILE           write live hosts to FILE (default: ~/sni_hosts_latest.txt)
-#   --help            show help
+# Luphahla Host Scan - Unified Scanner (Liveness + Zero-Rating simultaneously)
+# Checks TLS, HTTP headers, and speed in one pass.
+# Usage: ./auto-verify.sh
 
 set -o pipefail
 
@@ -27,23 +21,13 @@ else
   }
 fi
 
-# Portable stat
-_get_mtime() {
-  local file="$1"
-  if stat -c %y "$file" 2>/dev/null; then
-    stat -c %y "$file"
-  else
-    stat -f %Sm "$file" 2>/dev/null
-  fi
-}
-export -f _get_mtime
-
 # ---------- Defaults ----------
 USE_COLOR=true
 TIMEOUT=5
 PARALLEL=30
-HOSTS_FILE=""
+BATCH_SIZE=5000
 OUTPUT_FILE="${HOME}/sni_hosts_latest.txt"
+SCORED_FILE="${HOME}/sni_hosts_scored.txt"   # New: saves scores!
 CACHE_FILE="${HOME}/.cache/sni_hosts_cached.txt"
 TDIR="${HOME}/.cache/luphahla-scan"
 START_TIME=$(date +%s)
@@ -54,40 +38,34 @@ while [ $# -gt 0 ]; do
     --no-color)      USE_COLOR=false ;;
     --timeout)       TIMEOUT="$2"; shift ;;
     --parallel)      PARALLEL="$2"; shift ;;
-    --hosts-file)    HOSTS_FILE="$2"; shift ;;
-    -o)              OUTPUT_FILE="$2"; shift ;;
+    --batch)         BATCH_SIZE="$2"; shift ;;
     --help|-h)
-      sed -n '2,/^$/p' "$0" | sed 's/^# //'
+      echo "Luphahla Unified Scanner"
+      echo "  Scans for live hosts AND zero-rating in the same pass."
       exit 0
       ;;
-    *)
-      echo "Unknown option: $1" >&2
-      exit 2
-      ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
 
 # ---------- Color setup ----------
 if [ "$USE_COLOR" = false ]; then
-  RESET=''; BOLD=''; DIM=''; UNDERLINE=''
-  RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; MAGENTA=''; WHITE=''
+  RESET=''; BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; WHITE=''; MAGENTA=''
   BRIGHT_RED=''; BRIGHT_GREEN=''; BRIGHT_YELLOW=''; BRIGHT_BLUE=''; BRIGHT_CYAN=''; BRIGHT_MAGENTA=''
 else
-  RESET='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'; UNDERLINE='\033[4m'
-  RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; MAGENTA='\033[35m'; WHITE='\033[37m'
+  RESET='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'; RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033[36m'; WHITE='\033[37m'; MAGENTA='\033[35m'
   BRIGHT_RED='\033[91m'; BRIGHT_GREEN='\033[92m'; BRIGHT_YELLOW='\033[93m'; BRIGHT_BLUE='\033[94m'; BRIGHT_CYAN='\033[96m'; BRIGHT_MAGENTA='\033[95m'
 fi
 
 # ---------- Setup temp dirs ----------
-mkdir -p "$TDIR" || {
-  echo -e "${RED}Error: Could not create $TDIR${RESET}" >&2
-  exit 1
-}
+mkdir -p "$TDIR" || { echo -e "${RED}Error: Could not create $TDIR${RESET}" >&2; exit 1; }
 trap 'rm -rf "$TDIR"' EXIT INT TERM
 FRESH_FILE="$TDIR/fresh_sni.txt"
 LIVE_FILE="$TDIR/live.txt"
+SCORED_RAW="$TDIR/scored_raw.txt"
 : > "$LIVE_FILE"
+: > "$SCORED_RAW"
 
 # ---------- Banner ----------
 [ -t 1 ] && clear
@@ -99,422 +77,316 @@ echo "  ██║     ██║   ██║██╔═══╝ ██╔══
 echo "  ███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║ "
 echo "  ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ "
 echo -e "${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}            G L O B A L   H O S T   S C A N     🌍${RESET}"
-echo -e "${CYAN}               Luphahla Host Scan - Auto Verify${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}   U N I F I E D   L I V E   +   Z E R O   S C A N   🔄🚀${RESET}"
+echo -e "${CYAN}          Luphahla Host Scan - Batch + Zero-Rated${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
-echo -e "  ${YELLOW}Zimbabwe${RESET} • ${GREEN}Africa${RESET} • ${BLUE}Americas${RESET} • ${MAGENTA}Europe${RESET} • ${CYAN}Asia${RESET}"
+echo -e "  ${YELLOW}Batch Size:${RESET} ${BRIGHT_WHITE}$BATCH_SIZE${RESET}  ${YELLOW}Timeout:${RESET} ${BRIGHT_WHITE}${TIMEOUT}s${RESET}  ${YELLOW}Parallel:${RESET} ${BRIGHT_WHITE}$PARALLEL${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
 echo ""
 
-# ---------- Network check ----------
+# ---------- Network Check ----------
 ONLINE=false
-if command -v ping >/dev/null; then
-  if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-    ONLINE=true
-  elif ping -c 1 -t 2 8.8.8.8 >/dev/null 2>&1; then
-    ONLINE=true
-  fi
+if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ping -c 1 -t 2 8.8.8.8 >/dev/null 2>&1; then
+  ONLINE=true
+  echo -e "  ${GREEN}✓ Network: ONLINE${RESET}"
+else
+  echo -e "  ${RED}✗ Network: OFFLINE${RESET}"
 fi
+
+# ============================================================
+#  DISCOVERY ENGINE (Grabs ALL IPs & Domains)
+# ============================================================
+echo ""
+echo -e "${BRIGHT_BLUE}${BOLD}  ── Grabbing targets ──${RESET}"
 
 if [ "$ONLINE" = true ]; then
-  echo -e "  ${GREEN}${BOLD}✓${RESET} ${GREEN}Network: ONLINE${RESET}"
+  echo -e "  ${CYAN}●${RESET} Detecting your ISP..."
+  CURRENT_ASN=$(curl -s -m 5 "https://ipinfo.io/org" | grep -oE 'AS[0-9]+' | head -1)
+  if [ -z "$CURRENT_ASN" ]; then
+    CURRENT_ASN=$(curl -s -m 5 "https://api.hackertarget.com/aslookup/8.8.8.8" | grep -oE 'AS[0-9]+' | head -1)
+  fi
+
+  if [ -n "$CURRENT_ASN" ]; then
+    echo -e "  ${GREEN}✓${RESET} Detected ASN: ${BRIGHT_WHITE}$CURRENT_ASN${RESET}"
+    echo -e "  ${CYAN}●${RESET} Fetching ALL IP ranges..."
+    RANGES=$(curl -s -m 15 "https://ipinfo.io/$CURRENT_ASN" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+')
+    if [ -z "$RANGES" ]; then
+      RANGES=$(curl -s -m 15 "https://api.hackertarget.com/aslookup/$CURRENT_ASN" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+')
+    fi
+    if [ -n "$RANGES" ]; then
+      echo "$RANGES" | while read -r cidr; do
+        local mask="${cidr#*/}"; local base="${cidr%/*}"
+        if [ "$mask" -eq 24 ]; then
+          local prefix="${base%.*}"
+          for i in $(seq 1 254); do echo "${prefix}.${i}"; done
+        elif [ "$mask" -eq 16 ]; then
+          local prefix="${base%.*.*}"
+          for i in $(seq 0 255); do for j in $(seq 1 254); do echo "${prefix}.${i}.${j}"; done; done
+        elif [ "$mask" -eq 8 ]; then
+          echo -e "  ${BRIGHT_YELLOW}⚠ /8 range (16M IPs) - will be huge!${RESET}"
+          local prefix="${base%.*.*.*}"
+          for i in $(seq 0 255); do for j in $(seq 0 255); do for k in $(seq 1 254); do echo "${prefix}.${i}.${j}.${k}"; done; done; done
+        else
+          local prefix="${base%.*}"; for i in $(seq 1 254); do echo "${prefix}.${i}"; done
+        fi
+      done > "$TDIR/isp_ips.txt"
+      COUNT=$(wc -l < "$TDIR/isp_ips.txt")
+      echo -e "  ${GREEN}✓${RESET} Generated ${BRIGHT_WHITE}$COUNT${RESET} IPs."
+    fi
+  fi
+
+  echo -e "  ${CYAN}●${RESET} Fetching domains from SSL logs..."
+  for domain in "co.zw" "google.com" "facebook.com" "microsoft.com" "amazon.com"; do
+    curl -s -m 15 "https://crt.sh/?q=%25.${domain}&output=json" 2>/dev/null | \
+      grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' >> "$TDIR/ct_hosts.txt"
+  done
+  sort -u "$TDIR/ct_hosts.txt" -o "$TDIR/ct_hosts.txt"
+  CT_COUNT=$(wc -l < "$TDIR/ct_hosts.txt")
+  echo -e "  ${GREEN}✓${RESET} Found ${BRIGHT_WHITE}$CT_COUNT${RESET} subdomains."
 else
-  echo -e "  ${RED}${BOLD}✗${RESET} ${RED}Network: OFFLINE${RESET}"
+  echo -e "  ${YELLOW}⚠ Offline mode. Using cache.${RESET}"
 fi
 
-# ---------- Build GLOBAL host list ----------
-echo ""
-echo -e "${BRIGHT_BLUE}${BOLD}  ── Building Global Target List ──${RESET}"
-
-if [ -n "$HOSTS_FILE" ] && [ -f "$HOSTS_FILE" ]; then
-  cp "$HOSTS_FILE" "$FRESH_FILE"
-  echo -e "  ${CYAN}●${RESET} Using custom host list: ${BRIGHT_WHITE}$HOSTS_FILE${RESET}"
-elif [ "$ONLINE" = true ]; then
-  # ================================================================
-  # FULL MASSIVE GLOBAL LIST (UNTRUNCATED)
-  # ================================================================
+# ============================================================
+#  MERGE ALL SOURCES
+# ============================================================
+: > "$FRESH_FILE"
+[ -f "$TDIR/isp_ips.txt" ] && cat "$TDIR/isp_ips.txt" >> "$FRESH_FILE"
+[ -f "$TDIR/ct_hosts.txt" ] && cat "$TDIR/ct_hosts.txt" >> "$FRESH_FILE"
+[ -f "$OUTPUT_FILE" ] && cat "$OUTPUT_FILE" >> "$FRESH_FILE"
+[ -f "$CACHE_FILE" ] && cat "$CACHE_FILE" >> "$FRESH_FILE"
+if [ ! -s "$FRESH_FILE" ]; then
+  echo -e "  ${YELLOW}⚠ Emergency fallback.${RESET}"
   cat > "$FRESH_FILE" << 'EOF'
-# ====================================================
-# ZIMBABWE - ECONET, NETONE, TELECEL, LIQUID, BANKS
-# ====================================================
-econet.co.zw
-www.econet.co.zw
-mms.econet.co.zw
-messaging.econet.co.zw
-ecocash.co.zw
-www.ecocash.co.zw
-api.ecocash.co.zw
-netone.co.zw
-www.netone.co.zw
-onemoney.co.zw
-www.onemoney.co.zw
-telecel.co.zw
-www.telecel.co.zw
-liquid.co.zw
-www.liquidtelecom.com
-liquid.africa
-potraz.gov.zw
-zimpost.co.zw
-cabs.co.zw
-www.cabs.co.zw
-stewardbank.co.zw
-www.stewardbank.co.zw
-fbc.co.zw
-www.fbc.co.zw
-herald.co.zw
-newsday.co.zw
-chronicle.co.zw
-technomag.co.zw
-zbc.co.zw
-www.zbc.co.zw
-
-# ====================================================
-# AFRICA (MTN, VODACOM, SAFARICOM, ORANGE, AIRTEL)
-# ====================================================
-mtn.co.za
-www.mtn.co.za
-vodacom.co.za
-www.vodacom.co.za
-cellc.co.za
-www.cellc.co.za
-telkom.co.za
-www.telkom.co.za
-safaricom.co.ke
-www.safaricom.co.ke
-airtel.africa
-www.airtel.africa
-orange.sn
-www.orange.sn
-africastalking.com
-www.africastalking.com
-mybroadband.co.za
-www.mybroadband.co.za
-standardbank.co.za
-www.standardbank.co.za
-absa.co.za
-www.absa.co.za
-capitecbank.co.za
-www.capitecbank.co.za
-equitybank.co.ke
-www.equitybank.co.ke
-kcb.co.ke
-www.kcb.co.ke
-
-# ====================================================
-# NORTH AMERICA (US/Canada - Google, Meta, MS, Amazon)
-# ====================================================
 google.com
-www.google.com
-mail.google.com
-gmail.com
-android.clients.google.com
-android.googleapis.com
-play.googleapis.com
-update.googleapis.com
-connectivitycheck.gstatic.com
-googleapis.com
-www.googleapis.com
 youtube.com
-www.youtube.com
-m.youtube.com
-youtu.be
-googlevideo.com
-ggpht.com
-googleusercontent.com
-googleadservices.com
 facebook.com
-www.facebook.com
-m.facebook.com
-connect.facebook.com
-graph.facebook.com
-instagram.com
-www.instagram.com
-cdninstagram.com
 whatsapp.com
-www.whatsapp.com
-api.whatsapp.com
+instagram.com
 microsoft.com
-www.microsoft.com
-live.com
-login.live.com
-outlook.com
-office.com
-azure.com
-windowsupdate.com
-update.microsoft.com
 amazon.com
-www.amazon.com
-aws.amazon.com
-amazonaws.com
-cloudfront.net
-netflix.com
-www.netflix.com
-cdn.netflix.com
-apple.com
-www.apple.com
-apps.apple.com
-itunes.apple.com
-icloud.com
-www.icloud.com
-swscan.apple.com
-mesu.apple.com
-ocsp.apple.com
-captive.apple.com
-spotify.com
-www.spotify.com
-spotifycdn.com
-github.com
-raw.githubusercontent.com
-stackoverflow.com
-reddit.com
-x.com
-twitter.com
-t.co
-linkedin.com
-www.linkedin.com
-adobe.com
-www.adobe.com
-salesforce.com
-www.salesforce.com
-slack.com
-www.slack.com
-zoom.us
-www.zoom.us
-
-# ====================================================
-# EUROPE (UK, Germany, France, Netherlands)
-# ====================================================
-bbc.co.uk
-www.bbc.co.uk
-bbc.com
-www.bbc.com
-deutsche-bank.de
-www.deutsche-bank.de
-sap.com
-www.sap.com
-siemens.com
-www.siemens.com
-zalando.de
-www.zalando.de
-bp.com
-www.bp.com
-vodafone.com
-www.vodafone.com
-vodafone.co.uk
-www.vodafone.co.uk
-sky.com
-www.sky.com
-ft.com
-www.ft.com
-reuters.com
-www.reuters.com
-nginx.com
-www.nginx.com
-
-# ====================================================
-# ASIA / PACIFIC (China, Japan, India, Australia)
-# ====================================================
-baidu.com
-www.baidu.com
-alibaba.com
-www.alibaba.com
-tencent.com
-www.tencent.com
-qq.com
-www.qq.com
-yahoo.co.jp
-www.yahoo.co.jp
-naver.com
-www.naver.com
-line.me
-www.line.me
-shopee.sg
-www.shopee.sg
-tokopedia.com
-www.tokopedia.com
-flipkart.com
-www.flipkart.com
-paytm.com
-www.paytm.com
-telstra.com.au
-www.telstra.com.au
-optus.com.au
-www.optus.com.au
-abc.net.au
-www.abc.net.au
-airtel.in
-www.airtel.in
-jio.com
-www.jio.com
-
-# ====================================================
-# SOUTH AMERICA
-# ====================================================
-globo.com
-www.globo.com
-uol.com.br
-www.uol.com.br
-mercadolivre.com.br
-www.mercadolivre.com.br
-mercadolibre.com
-www.mercadolibre.com
-claro.com.br
-www.claro.com.br
-
-# ====================================================
-# CDNs / CLOUD PROVIDERS / PUBLIC RESOLVERS
-# ====================================================
-one.one.one.one
-cloudflare-dns.com
-1.1.1.1
-quad9.net
-opendns.com
-akamaiedge.net
-fastly.net
-cdn77.net
-b-cdn.net
-edgecastcdn.net
-stackpathcdn.com
-azureedge.net
-cloudflare.com
-www.cloudflare.com
 EOF
-  # ================================================================
-  # END OF FULL GLOBAL LIST
-  # ================================================================
-
-  echo -e "  ${CYAN}●${RESET} Generated ${BRIGHT_WHITE}global${RESET} target list (full)."
-elif [ -f "$CACHE_FILE" ]; then
-  cp "$CACHE_FILE" "$FRESH_FILE"
-  CACHE_DATE=$(_get_mtime "$CACHE_FILE")
-  echo -e "  ${YELLOW}●${RESET} Using cached list ${DIM}(last online: $CACHE_DATE)${RESET}"
-elif [ -f "$OUTPUT_FILE" ]; then
-  cp "$OUTPUT_FILE" "$FRESH_FILE"
-  echo -e "  ${YELLOW}●${RESET} Using existing output file: ${BRIGHT_WHITE}$OUTPUT_FILE${RESET}"
-else
-  echo -e "  ${RED}✗ No hosts available. Run online first.${RESET}" >&2
-  exit 3
-fi
-
-# Merge and sort
-if [ -f "$OUTPUT_FILE" ]; then
-  cat "$OUTPUT_FILE" >> "$FRESH_FILE"
 fi
 sort -u "$FRESH_FILE" -o "$FRESH_FILE"
-
-TOTAL=$(grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" | wc -l)
-if [ "$TOTAL" -eq 0 ]; then
-  echo -e "  ${RED}✗ No valid hosts found.${RESET}" >&2
-  exit 3
-fi
-echo -e "  ${GREEN}✓${RESET} Total Global Candidates: ${BRIGHT_CYAN}$TOTAL${RESET}"
+grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" > "$FRESH_FILE.tmp"
+mv "$FRESH_FILE.tmp" "$FRESH_FILE"
+TOTAL=$(wc -l < "$FRESH_FILE")
+echo -e "  ${GREEN}✓${RESET} Total targets: ${BRIGHT_CYAN}$TOTAL${RESET}"
 echo ""
 
-# ---------- TLS check function ----------
-check_tls() {
+# ============================================================
+#  UNIFIED INSPECTION FUNCTION (TLS + HTTP + Speed)
+# ============================================================
+inspect_host() {
   local host="$1"
   local port="$2"
+  local score=0
+  local speed="N/A"
+  local zero_label="Unknown"
+  local server_header=""
+
+  # 1. TLS Handshake (Liveness)
   if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -verify_return_error -verify_ip "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1
+    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -verify_return_error -verify_ip "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1 || return 1
   else
-    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1
+    _timeout "$TIMEOUT" openssl s_client -connect "$host:$port" -servername "$host" -verify_return_error -verify_hostname "$host" -verify_quiet -brief -no_ign_eof </dev/null >/dev/null 2>&1 || return 1
   fi
+  score=$((score + 30))
+
+  # 2. HTTP Headers (Zero-Rating Detection)
+  if command -v curl >/dev/null; then
+    local headers
+    headers=$(curl -s -I -m "$TIMEOUT" -k "https://${host}:${port}" 2>/dev/null)
+    server_header=$(echo "$headers" | grep -i "^Server:" | head -1)
+    
+    if echo "$server_header" | grep -qi "gws\|google\|youtube"; then
+      zero_label="Google (Free)"
+      score=$((score + 40))
+    elif echo "$server_header" | grep -qi "facebook\|meta\|whatsapp\|instagram"; then
+      zero_label="Meta (Free)"
+      score=$((score + 40))
+    elif echo "$server_header" | grep -qi "cloudflare"; then
+      zero_label="Cloudflare (Often Free)"
+      score=$((score + 35))
+    elif echo "$server_header" | grep -qi "microsoft\|iis"; then
+      zero_label="Microsoft (Sometimes Free)"
+      score=$((score + 25))
+    elif echo "$server_header" | grep -qi "amazon\|aws\|cloudfront"; then
+      zero_label="Amazon (Often Free)"
+      score=$((score + 25))
+    else
+      zero_label="Unknown"
+      score=$((score + 5))
+    fi
+
+    # 3. Speed Test
+    local speed_result
+    speed_result=$(curl -s -o /dev/null -w "%{speed_download}" -m "$TIMEOUT" -k "https://${host}:${port}" 2>/dev/null)
+    if [[ "$speed_result" =~ ^[0-9]+ ]] && [ "$speed_result" -gt 0 ]; then
+      speed_kb=$(echo "$speed_result / 1024" | bc 2>/dev/null)
+      if [ -n "$speed_kb" ]; then
+        if [ "$speed_kb" -gt 100 ]; then
+          score=$((score + 25)); speed="⚡ ${speed_kb} KB/s"
+        elif [ "$speed_kb" -gt 10 ]; then
+          score=$((score + 10)); speed="🐢 ${speed_kb} KB/s"
+        else
+          speed="⛔ ${speed_kb} KB/s"
+        fi
+      fi
+    else
+      speed="⛔ No Data"
+    fi
+  else
+    score=$((score - 10))
+    speed="Install curl for full detection"
+  fi
+
+  # Output: SCORE|HOST|ZERO_LABEL|SPEED
+  echo "${score}|${host}|${zero_label}|${speed}"
 }
-export -f check_tls _timeout
+export -f inspect_host _timeout
 export TIMEOUT
 
-# ---------- Parallel verification (fast) ----------
-parallel_check() {
-  local port="$1"
-  local tmp_live="$TDIR/live_${port}.txt"
-  : > "$tmp_live"
-  
-  echo -e "${BRIGHT_BLUE}${BOLD}  ── TLS Checking Port ${port} (Global) ──${RESET}"
-  echo -e "  ${DIM}Scanning $TOTAL hosts in parallel (${PARALLEL} jobs)...${RESET}"
-  
-  # Use xargs -P for maximum speed
+# ---------- Scan a single batch (unified) ----------
+scan_batch() {
+  local batch_file="$1"
+  local port="$2"
+  local tmp_scored="$TDIR/scored_${port}_$$.txt"
+  : > "$tmp_scored"
+
   if command -v xargs >/dev/null && xargs --help 2>&1 | grep -q -- '-P'; then
-    grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" | \
+    grep -vE '^[[:space:]]*(#|$)' "$batch_file" | \
       xargs -P "$PARALLEL" -I {} bash -c '
-        if check_tls "$1" '"$port"'; then
-          echo "$1"
-        fi
-      ' _ {} >> "$tmp_live" 2>/dev/null &
-    
-    # Show a spinner while xargs runs in background
+        inspect_host "$1" '"$port"'
+      ' _ {} >> "$tmp_scored" 2>/dev/null &
     local pid=$!
     local spin='⣾⣽⣻⢿⡿⣟⣯⣷'
     local i=0
     while kill -0 "$pid" 2>/dev/null; do
-      printf "\r  ${CYAN}${spin:i++%${#spin}:1}${RESET} Scanning in progress..."
+      printf "\r  ${CYAN}${spin:i++%${#spin}:1}${RESET} Unified scan (live+zero) port $port..."
       sleep 0.1
     done
     wait "$pid"
-    printf "\r  ${GREEN}✓${RESET} Scan complete.                    \n"
+    printf "\r  ${GREEN}✓${RESET} Port $port unified scan complete.                    \n"
   else
-    # Fallback to sequential if no xargs -P
-    echo -e "  ${YELLOW}⚠${RESET} Parallel not available – using sequential (slower)."
     while IFS= read -r host; do
       [[ "$host" =~ ^[[:space:]]*# ]] && continue
       [ -z "$host" ] && continue
-      if check_tls "$host" "$port"; then
-        echo "$host" >> "$tmp_live"
-      fi
-    done < "$FRESH_FILE"
+      inspect_host "$host" "$port" >> "$tmp_scored"
+    done < "$batch_file"
   fi
-  
-  sort -u "$tmp_live" -o "$tmp_live"
-  cat "$tmp_live" >> "$LIVE_FILE"
+
+  # Merge scored results into the global scored file
+  cat "$tmp_scored" >> "$SCORED_RAW"
 }
 
-# ---------- Run checks ----------
-parallel_check 443
-parallel_check 8080
+# ============================================================
+#  INTERACTIVE BATCH PROCESSING ENGINE
+# ============================================================
+BATCH_NUM=1
+START_LINE=1
 
-# ---------- Finalize results ----------
-sort -u "$LIVE_FILE" -o "$LIVE_FILE"
-LIVECOUNT=$(grep -cve '^[[:space:]]*$' "$LIVE_FILE" 2>/dev/null || echo 0)
+if [ "$TOTAL" -le "$BATCH_SIZE" ]; then
+  echo -e "${BRIGHT_BLUE}${BOLD}  ── Unified scan (single batch) ──${RESET}"
+  scan_batch "$FRESH_FILE" "443"
+  # Optional: also check 8080? 443 is usually enough for zero-rating, skip 8080 to save time.
+else
+  echo -e "${BRIGHT_BLUE}${BOLD}  ── Interactive Batching (${BATCH_SIZE} per batch) ──${RESET}"
+  
+  while [ $START_LINE -le "$TOTAL" ]; do
+    END_LINE=$((START_LINE + BATCH_SIZE - 1))
+    [ $END_LINE -gt "$TOTAL" ] && END_LINE="$TOTAL"
+    
+    BATCH_FILE="$TDIR/batch_${BATCH_NUM}.txt"
+    sed -n "${START_LINE},${END_LINE}p" "$FRESH_FILE" > "$BATCH_FILE"
+    BATCH_COUNT=$((END_LINE - START_LINE + 1))
+    
+    echo ""
+    echo -e "${BRIGHT_CYAN}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
+    echo -e "${BRIGHT_CYAN}${BOLD}  ║         BATCH #${BATCH_NUM} (${BATCH_COUNT} hosts)           ║${RESET}"
+    echo -e "${BRIGHT_CYAN}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
+    
+    scan_batch "$BATCH_FILE" "443"
+    
+    # Count current live (scored) hosts
+    CURRENT_LIVE=$(grep -cve '^[[:space:]]*$' "$SCORED_RAW" 2>/dev/null || echo 0)
+    echo -e "  ${GREEN}✓${RESET} Live+Scored hosts so far: ${BRIGHT_WHITE}$CURRENT_LIVE${RESET}"
+    
+    # Show top 5 scored results from this batch
+    if [ -f "$SCORED_RAW" ] && [ "$CURRENT_LIVE" -gt 0 ]; then
+      echo -e "  ${BRIGHT_CYAN}Top scored from this batch:${RESET}"
+      tail -n "$BATCH_COUNT" "$SCORED_RAW" 2>/dev/null | sort -t'|' -k1 -nr | head -5 | while IFS='|' read -r score host zero speed; do
+        if [ "$score" -gt 70 ]; then label="${BRIGHT_GREEN}[HIGH]${RESET}"; elif [ "$score" -gt 40 ]; then label="${BRIGHT_YELLOW}[MEDIUM]${RESET}"; else label="${BRIGHT_RED}[LOW]${RESET}"; fi
+        printf "    %-8s ${CYAN}%-25s${RESET} ${DIM}%-20s %s${RESET}\n" "$label" "$host" "$zero" "$speed"
+      done
+    fi
+
+    if [ $END_LINE -ge "$TOTAL" ]; then
+      echo -e "  ${GREEN}✓ All batches processed!${RESET}"
+      break
+    fi
+    
+    REMAINING=$((TOTAL - END_LINE))
+    echo ""
+    echo -e "${BRIGHT_YELLOW}${BOLD}  ─── Next batch: ${REMAINING} hosts remaining ───${RESET}"
+    echo "  [1] Continue to next batch"
+    echo "  [2] Stop and Save results (Exit gracefully)"
+    echo "  [0] Exit immediately (kill script)"
+    echo ""
+    read -p "  Choose [1/2/0]: " CHOICE
+    
+    case "$CHOICE" in
+      0) echo -e "  ${RED}Exiting. Results NOT saved.${RESET}"; exit 0 ;;
+      2) echo -e "  ${GREEN}Stopping. Saving results.${RESET}"; break ;;
+      1|*) echo -e "  ${CYAN}Continuing...${RESET}"; START_LINE=$((END_LINE + 1)); BATCH_NUM=$((BATCH_NUM + 1)) ;;
+    esac
+  done
+fi
+
+# ============================================================
+#  FINALIZE, SORT, AND SAVE RESULTS
+# ============================================================
+# Extract live hosts (for compatibility) - only those with a score > 30 (actual TLS success)
+sort -u "$SCORED_RAW" -o "$SCORED_RAW"
+grep -vE '^[[:space:]]*$' "$SCORED_RAW" > "$SCORED_RAW.tmp"
+mv "$SCORED_RAW.tmp" "$SCORED_RAW"
+
+LIVECOUNT=$(wc -l < "$SCORED_RAW")
+
+# Generate plain host list from scored data
+cut -d'|' -f2 "$SCORED_RAW" > "$LIVE_FILE"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# ---------- Beautiful Summary Box ----------
 echo ""
-echo -e "${BRIGHT_GREEN}${BOLD}  ╔═══════════════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ║            G L O B A L   S U M M A R Y            ║${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ╚═══════════════════════════════════════════════════╝${RESET}"
-echo -e "  ${CYAN}●${RESET} Candidates:  ${BRIGHT_WHITE}$TOTAL${RESET}"
-echo -e "  ${CYAN}●${RESET} Live:         ${BRIGHT_GREEN}$LIVECOUNT${RESET}"
-echo -e "  ${CYAN}●${RESET} Duration:     ${BRIGHT_YELLOW}${DURATION}s${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║    F I N A L   R E S U L T S          ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
+echo -e "  ${CYAN}●${RESET} Total Candidates: ${BRIGHT_WHITE}$TOTAL${RESET}"
+echo -e "  ${CYAN}●${RESET} Live + Scored:     ${BRIGHT_GREEN}$LIVECOUNT${RESET}"
+echo -e "  ${CYAN}●${RESET} Duration:          ${BRIGHT_YELLOW}${DURATION}s${RESET}"
 
-# ---------- Show sample of live hosts ----------
-if [ "$LIVECOUNT" -gt 0 ]; then
-  echo ""
-  echo -e "${BRIGHT_CYAN}${BOLD}  ── Live Hosts (Top 10) ──${RESET}"
-  head -10 "$LIVE_FILE" | nl -w2 -s'. ' | while read -r line; do
-    echo -e "  ${GREEN}✓${RESET} ${WHITE}$line${RESET}"
-  done
-  if [ "$LIVECOUNT" -gt 10 ]; then
-    echo -e "  ${DIM}... and $(($LIVECOUNT - 10)) more.${RESET}"
-  fi
-else
-  echo -e "  ${YELLOW}${BOLD}⚠${RESET} ${YELLOW}No live hosts found globally.${RESET}"
-fi
-
-# ---------- Save output and cache ----------
-echo ""
 if [ "$LIVECOUNT" -gt 0 ]; then
   cp "$LIVE_FILE" "$OUTPUT_FILE"
   cp "$LIVE_FILE" "$CACHE_FILE"
-  echo -e "  ${GREEN}✓${RESET} ${GREEN}Saved${RESET} ${BRIGHT_CYAN}$LIVECOUNT${RESET} ${GREEN}hosts to${RESET} ${BRIGHT_WHITE}$OUTPUT_FILE${RESET}"
-  echo -e "  ${GREEN}✓${RESET} ${GREEN}Cached for offline use at${RESET} ${BRIGHT_WHITE}$CACHE_FILE${RESET}"
+  cp "$SCORED_RAW" "$SCORED_FILE"
+  
+  echo -e "  ${GREEN}✓${RESET} Plain list saved to ${BRIGHT_WHITE}$OUTPUT_FILE${RESET}"
+  echo -e "  ${GREEN}✓${RESET} Scored list saved to ${BRIGHT_WHITE}$SCORED_FILE${RESET}"
+  
+  echo ""
+  echo -e "${BRIGHT_CYAN}${BOLD}  ── Scored Hosts (Highest First) ──${RESET}"
+  sort -t'|' -k1 -nr "$SCORED_RAW" | while IFS='|' read -r score host zero speed; do
+    if [ "$score" -gt 70 ]; then label="${BRIGHT_GREEN}[HIGH]${RESET}"; elif [ "$score" -gt 40 ]; then label="${BRIGHT_YELLOW}[MEDIUM]${RESET}"; else label="${BRIGHT_RED}[LOW]${RESET}"; fi
+    printf "  %-8s ${CYAN}%-30s${RESET} ${DIM}%-20s %s${RESET}\n" "$label" "$host" "$zero" "$speed"
+  done
 else
-  echo -e "  ${YELLOW}⚠${RESET} ${YELLOW}Existing output unchanged.${RESET}"
+  echo -e "  ${YELLOW}No live hosts found.${RESET}"
 fi
 
 echo ""
-echo -e "${BRIGHT_MAGENTA}${BOLD}  ╔═══════════════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_MAGENTA}${BOLD}  ║        LUPHAHLA GLOBAL SCAN COMPLETE             ║${RESET}"
-echo -e "${BRIGHT_MAGENTA}${BOLD}  ╚═══════════════════════════════════════════════════╝${RESET}"
-echo ""
+echo -e "${BRIGHT_MAGENTA}${BOLD}  ╔════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_MAGENTA}${BOLD}  ║   UNIFIED SCAN COMPLETE (${BATCH_NUM} batches)   ║${RESET}"
+echo -e "${BRIGHT_MAGENTA}${BOLD}  ╚════════════════════════════════════════╝${RESET}"
 exit 0
