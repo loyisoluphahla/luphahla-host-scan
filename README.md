@@ -1,43 +1,18 @@
-# ========================================================================
-#           LUPHAHLA HOST SCAN - INSTALLATION GUIDE
-#               (WSL / Linux / macOS / Termux)
-# ========================================================================
+# Luphahla Host Scan
 
-# --- IMPORTANT NOTES ---
-# • All commands assume you have a working internet connection.
-# • For macOS, Homebrew (https://brew.sh) is required.
-# • For Termux, grant storage permissions if needed (termux-setup-storage).
-# • The 'iproute2' package is Linux-specific; macOS and Termux users may skip it.
+A multi-platform host scanning tool written in Bash.
 
+## Installation
 
-# ============================
-#  1.  WINDOWS (WSL)
-# ============================
+### Prerequisites
+- **Internet connection**
+- **macOS:** [Homebrew](https://brew.sh) required
+- **Termux:** Run `termux-setup-storage` (optional)
 
-# 1. Restart your computer if Windows asks you to.
+---
 
-# 2. Open your installed Linux distribution (e.g., Ubuntu) from Start.
-
-# 3. Update system & install dependencies
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y git bash openssl coreutils iproute2
-
-# 4. Clone, enter, and set permissions
-git clone https://github.com/loyisoluphahla/luphahla-host-scan.git
-cd luphahla-host-scan
-chmod +x auto-verify.sh verify.sh
-
-# 5. Run
-./auto-verify.sh
-
-# 6. Syntax check (optional)
-bash -n auto-verify.sh && bash -n verify.sh
-
-
-# ============================
-#  2.  LINUX (Debian / Ubuntu)
-# ============================
-
+### 1. Windows (WSL)
+```bash
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y git bash openssl coreutils iproute2
 
@@ -45,67 +20,73 @@ git clone https://github.com/loyisoluphahla/luphahla-host-scan.git
 cd luphahla-host-scan
 chmod +x auto-verify.sh verify.sh
 ./auto-verify.sh
-bash -n auto-verify.sh && bash -n verify.sh
+Linux (Debian/Ubuntu)
 
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git bash openssl coreutils iproute2
 
-# ============================
-#  3.  LINUX (Fedora / RHEL / CentOS)
-# ============================
+git clone https://github.com/loyisoluphahla/luphahla-host-scan.git
+cd luphahla-host-scan
+chmod +x auto-verify.sh verify.sh
+./auto-verify.sh
+```
 
-sudo dnf update -y               # or 'sudo yum update -y'
+3. Linux (Fedora/RHEL/CentOS)
+
+```bash
+sudo dnf update -y   # or 'sudo yum update -y'
 sudo dnf install -y git bash openssl coreutils iproute2
 
 git clone https://github.com/loyisoluphahla/luphahla-host-scan.git
 cd luphahla-host-scan
 chmod +x auto-verify.sh verify.sh
 ./auto-verify.sh
-bash -n auto-verify.sh && bash -n verify.sh
+```
 
+4. macOS (Homebrew)
 
-# ============================
-#  4.  macOS (with Homebrew)
-# ============================
-
-# Install Homebrew if not already installed:
-# /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
+```bash
 brew update
 brew install git bash openssl coreutils
-# Note: iproute2 is not available on macOS – the script will use system tools.
+# iproute2 is not available on macOS – script uses system tools.
 
 git clone https://github.com/loyisoluphahla/luphahla-host-scan.git
 cd luphahla-host-scan
 chmod +x auto-verify.sh verify.sh
 ./auto-verify.sh
-bash -n auto-verify.sh && bash -n verify.sh
+```
 
+5. Android (Termux)
 
-# ============================
-#  5.  ANDROID (Termux)
-# ============================
-
-# Update Termux packages
+```bash
 pkg update && pkg upgrade -y
-
-# Install dependencies (iproute2 may not be available; install if found)
 pkg install -y git bash openssl coreutils
-pkg install -y iproute2 2>/dev/null || echo "iproute2 not available – skipping."
+pkg install -y iproute2 2>/dev/null || echo "iproute2 skipped"
 
-# Clone and set up
 git clone https://github.com/loyisoluphahla/luphahla-host-scan.git
 cd luphahla-host-scan
 chmod +x auto-verify.sh verify.sh
 ./auto-verify.sh
-bash -n auto-verify.sh && bash -n verify.sh
+```
 
+---
 
-# ========================================================================
-#  UPDATING AN EXISTING INSTALLATION (ALL PLATFORMS)
-# ========================================================================
+Updating (All Platforms)
 
+```bash
 cd ~/luphahla-host-scan
 git pull
 chmod +x auto-verify.sh verify.sh
 ./auto-verify.sh
+```
 
-# ========================================================================
+Verification
+
+Run a syntax check to confirm the scripts are valid:
+
+```bash
+bash -n auto-verify.sh && bash -n verify.sh
+```
+
+(No output = all good)
