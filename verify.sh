@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Luphahla Scanner – Zero‑Rated Host Checker
-# Usage: cat hosts.txt | ./verify.sh [--timeout 4] [--min-speed 50] [--vpn] [--analyze]
+# Luphahla Scanner – Zero-Rated Host Checker (Community Edition)
+# Usage: cat hosts.txt | ./verify.sh [--timeout 4] [--min-speed 50]
 
 set -o pipefail
 
 # ============================
 # DEFAULTS
 # ============================
-TIMEOUT=4                    # Default timeout increased to 4 seconds
+TIMEOUT=4
 MIN_SPEED=50
-VPN_MODE=false
-ANALYZE_MODE=false
 METHODS=("CONNECT" "POST" "HEAD" "GET")
+PORTS=(443 80)   # Check both HTTPS and HTTP
 
 # ============================
 # PARSE ARGUMENTS
@@ -20,10 +19,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --timeout)   TIMEOUT="$2"; shift ;;
     --min-speed) MIN_SPEED="$2"; shift ;;
-    --vpn)       VPN_MODE=true ;;
-    --analyze)   ANALYZE_MODE=true ;;
     --help)
-      echo "Usage: cat hosts.txt | $0 [--timeout 4] [--min-speed 50] [--vpn] [--analyze]"
+      echo "Usage: cat hosts.txt | $0 [--timeout 4] [--min-speed 50]"
+      echo "  Checks port 443 (HTTPS) and 80 (HTTP) for zero-rated hosts."
       exit 0
       ;;
     *) echo "Unknown option"; exit 2 ;;
@@ -37,23 +35,21 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
-# READ STDIN – SPLIT, TRIM, DEDUPLICATE (CASE-INSENSITIVE)
+# READ STDIN – SPLIT, TRIM, DEDUPLICATE
 # ============================
 INPUT=$(mktemp)
 trap 'rm -f "$INPUT"' EXIT
-
-# Read stdin, split by spaces, trim spaces, convert to lowercase, then sort unique
 cat /dev/stdin | tr ' ' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -vE '^[[:space:]]*(#|$)' | tr '[:upper:]' '[:lower:]' | sort -u > "$INPUT"
-
 TOTAL=$(wc -l < "$INPUT")
 [[ $TOTAL -eq 0 ]] && { echo -e "${Y}No hosts.${R}" >&2; exit 3; }
 
 # ============================
-# ZERO‑RATED DETECTION (case-insensitive)
+# ZERO‑RATED DETECTION (extended community patterns)
 # ============================
 is_free() {
   local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-  for p in google youtube facebook meta whatsapp instagram twitter x.com tesla spacex starlink netflix spotify cloudflare amazon microsoft apple icloud live outlook office bing yahoo econet netone mtn vodacom orange airtel safaricom github stackoverflow; do
+  for p in google youtube facebook meta whatsapp instagram twitter x.com tesla spacex starlink netflix spotify cloudflare amazon microsoft apple icloud live outlook office bing yahoo econet netone mtn vodacom orange airtel safaricom github stackoverflow \
+           econetwireless zigssh roshan etisalat mtnplay goodinternet learningpassport unicef msmehub latamairlines ooguy bundles orgonemoney topup apn vasapi selfcare ibills meet elevateyouth oldlock; do
     [[ "$h" == *"$p"* ]] && return 0
   done
   return 1
@@ -66,28 +62,14 @@ clear
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
 echo -e "${BG}${G}         L U P H A H L A   Z E R O - R A T E D   H O S T S            ${R}"
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
-if [[ "$ANALYZE_MODE" == true ]]; then
-  echo -e "  ${C}Mode:${R} ANALYZE (shows FREE, THROTTLED, BLOCKED)"
-elif [[ "$VPN_MODE" == true ]]; then
-  echo -e "  ${C}Mode:${R} VPN-ELIGIBLE (strict)"
-else
-  echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s)"
-fi
+echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s, ports 443 & 80)"
 echo ""
 
 # ============================
 # TABLE HEADERS
 # ============================
-if [[ "$ANALYZE_MODE" == true ]]; then
-  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-10s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS"
-  printf "  %-26s  %-10s  %-15s  %-10s  %-10s\n" "--------------------------" "----------" "---------------" "----------" "----------"
-elif [[ "$VPN_MODE" == true ]]; then
-  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-10s  %-8s${R}\n" "HOST" "METHOD" "IP" "SPEED" "LATENCY" "STATUS"
-  printf "  %-26s  %-10s  %-15s  %-10s  %-10s  %-8s\n" "--------------------------" "----------" "---------------" "----------" "----------" "--------"
-else
-  printf "  ${C}%-26s  %-10s  %-15s  %-10s${R}\n" "HOST" "METHOD" "IP" "SPEED"
-  printf "  %-26s  %-10s  %-15s  %-10s\n" "--------------------------" "----------" "---------------" "----------"
-fi
+printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-10s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS"
+printf "  %-26s  %-10s  %-15s  %-10s  %-10s\n" "--------------------------" "----------" "---------------" "----------" "----------"
 
 # ============================
 # SPINNER
@@ -106,47 +88,41 @@ COUNT=0; FOUND=0
 while IFS= read -r host; do
   ((COUNT++)); update_spinner
 
-  # Only zero‑rated hosts
   if ! is_free "$host"; then continue; fi
 
-  # Try methods
   SUCCESS=false
   SPEED_KB=0
-  LATENCY=999.0
   METHOD_USED=""
   IP_USED="N/A"
-  HTTP_CODE=""
+  BEST_PORT=0
 
-  for method in "${METHODS[@]}"; do
-    output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}|%{time_total}" -X "$method" -m "$TIMEOUT" "https://$host" 2>/dev/null)
-    code=$(echo "$output" | cut -d'|' -f1)
-    ip=$(echo "$output" | cut -d'|' -f2)
-    speed_bytes=$(echo "$output" | cut -d'|' -f3)
-    latency=$(echo "$output" | cut -d'|' -f4)
-    [[ -z "$ip" ]] && ip="N/A"
-    [[ -z "$latency" ]] && latency="999.0"
+  # Try each port
+  for port in "${PORTS[@]}"; do
+    for method in "${METHODS[@]}"; do
+      output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}|%{time_total}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
+      code=$(echo "$output" | cut -d'|' -f1)
+      ip=$(echo "$output" | cut -d'|' -f2)
+      speed_bytes=$(echo "$output" | cut -d'|' -f3)
+      [[ -z "$ip" ]] && ip="N/A"
 
-    # If we got a valid HTTP code (not empty and not 000)
-    if [[ -n "$code" && "$code" != "000" ]]; then
-      SUCCESS=true
-      METHOD_USED="$method"
-      IP_USED="$ip"
-      LATENCY="$latency"
-      HTTP_CODE="$code"
-      [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
-      break
-    fi
+      if [[ -n "$code" && "$code" != "000" ]]; then
+        SUCCESS=true
+        METHOD_USED="$method"
+        IP_USED="$ip"
+        BEST_PORT="$port"
+        [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
+        break 2   # exit both loops
+      fi
+    done
   done
 
-  # --- CLASSIFY STATUS (single variable, never concatenated) ---
+  # --- CLASSIFY STATUS ---
   if [[ "$SUCCESS" == false ]]; then
     STATUS="BLOCKED"
     SPEED_DISPLAY="N/A"
     METHOD_USED="-"
     IP_USED="N/A"
-    LATENCY_DISPLAY="N/A"
   else
-    # Speed display – fix "OKB/s" to "0KB/s"
     if (( SPEED_KB == 0 )); then
       SPEED_DISPLAY="0KB/s"
     elif (( SPEED_KB > 100 )); then
@@ -154,7 +130,6 @@ while IFS= read -r host; do
     else
       SPEED_DISPLAY="🐢${SPEED_KB}KB/s"
     fi
-    LATENCY_DISPLAY=$(printf "%.2f" "$LATENCY")s
 
     if (( SPEED_KB >= MIN_SPEED )); then
       STATUS="FREE (fast)"
@@ -163,55 +138,25 @@ while IFS= read -r host; do
     fi
   fi
 
-  # --- FILTERING ---
-  if [[ "$ANALYZE_MODE" == false ]]; then
-    if [[ "$STATUS" == "BLOCKED" || "$STATUS" == "THROTTLED" ]]; then
-      continue
-    fi
+  # --- FILTER: only show fast hosts ---
+  if [[ "$STATUS" != "FREE (fast)" ]]; then
+    continue
   fi
 
-  # VPN mode extra filters
-  if [[ "$VPN_MODE" == true && "$STATUS" != "BLOCKED" ]]; then
-    [[ "$METHOD_USED" != "CONNECT" ]] && continue
-    (( $(echo "$LATENCY > 1.5" | bc -l) )) && continue
-    server=$(curl -s -I -k -m 2 "https://$host" 2>/dev/null | grep -i "^Server:" | head -1)
-    [[ -z "$server" || "$server" == *"Unknown"* ]] && continue
-    VPN_STATUS="✅ PASS"
-  else
-    VPN_STATUS=""
-  fi
-
-  # Print row – only one STATUS placeholder, no duplication
+  # Print row
   printf "\r  %-70s\r" ""
-
-  if [[ "$ANALYZE_MODE" == true ]]; then
-    case "$STATUS" in
-      "FREE (fast)") STATUS_COLOR="${G}${STATUS}${R}" ;;
-      "THROTTLED")   STATUS_COLOR="${Y}${STATUS}${R}" ;;
-      "BLOCKED")     STATUS_COLOR="${RD}${STATUS}${R}" ;;
-      *)             STATUS_COLOR="${STATUS}" ;;
-    esac
-    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-10s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
-  elif [[ "$VPN_MODE" == true ]]; then
-    if (( SPEED_KB >= MIN_SPEED )); then
-      printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${W}%-10s${R}  ${G}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$LATENCY_DISPLAY" "$VPN_STATUS"
-    fi
-  else
-    # Standard mode
-    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY"
-  fi
-
+  case "$STATUS" in
+    "FREE (fast)") STATUS_COLOR="${G}${STATUS}${R}" ;;
+    "THROTTLED")   STATUS_COLOR="${Y}${STATUS}${R}" ;;
+    "BLOCKED")     STATUS_COLOR="${RD}${STATUS}${R}" ;;
+    *)             STATUS_COLOR="${STATUS}" ;;
+  esac
+  printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-10s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
   ((FOUND++))
 done < "$INPUT"
 
 printf "\r  %-70s\r" ""
 echo ""
-if [[ "$ANALYZE_MODE" == true ]]; then
-  echo -e "${G}✓${R} Analysis complete. Found ${C}$FOUND${R} zero‑rated hosts."
-  echo -e "  ${G}FREE (fast)${R}   : speed ≥ ${MIN_SPEED} KB/s"
-  echo -e "  ${Y}THROTTLED${R}    : speed < ${MIN_SPEED} KB/s (ISP slowing)"
-  echo -e "  ${RD}BLOCKED${R}     : no HTTP response (ISP blocking)"
-else
-  echo -e "${G}✓${R} Found: ${C}$FOUND${R} hosts (speed ≥ ${MIN_SPEED} KB/s)"
-fi
+echo -e "${G}✓${R} Found: ${C}$FOUND${R} zero-rated hosts (speed ≥ ${MIN_SPEED} KB/s)."
+echo -e "  ${C}Note:${R} Ports 443 (HTTPS) and 80 (HTTP) are checked."
 exit 0
