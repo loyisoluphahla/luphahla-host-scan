@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Luphahla Host Scan - TERMUX OPTIMIZED (No Signal 9)
-# Uses low parallelism and only 10 HTTP methods to prevent OOM kills.
+# Luphahla Host Scan - 4 METHODS ONLY (GET, HEAD, CONNECT, POST)
+# Safe for Termux - no OOM Killer.
 
 set -o pipefail
 
@@ -20,21 +20,18 @@ else
   }
 fi
 
-# ---------- Defaults (LOW for Termux) ----------
+# ---------- Defaults ----------
 USE_COLOR=true
-TIMEOUT=4               # Lower timeout
-PARALLEL=3              # ONLY 3 parallel jobs (Safe for Android)
-METHOD_SCAN=true        # Keep method scan, but only use 10 methods
+TIMEOUT=4
+PARALLEL=1                     # SEQUENTIAL - SAFEST
+METHOD_SCAN=true               # Enabled, but only 4 methods
 OUTPUT_FILE=""
 INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/verify-input.XXXXXX")
 RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/verify-results.XXXXXX")
 trap 'rm -f "$INPUT_FILE" "$RESULTS_FILE"' EXIT INT TERM
 
-# ---------- ONLY 10 USEFUL METHODS (Saves memory) ----------
-USEFUL_METHODS=(
-  "HEAD" "GET" "POST" "OPTIONS" "TRACE"
-  "PROPFIND" "LOCK" "UNLOCK" "MKCOL" "MOVE"
-)
+# ---------- ONLY 4 METHODS ----------
+METHODS=("GET" "HEAD" "CONNECT" "POST")
 
 # ---------- Parse arguments ----------
 while [ $# -gt 0 ]; do
@@ -45,15 +42,11 @@ while [ $# -gt 0 ]; do
     --no-method)     METHOD_SCAN=false ;;
     -o)              OUTPUT_FILE="$2"; shift ;;
     --help|-h)
-      echo "Luphahla Termux Scanner (Safe Mode)"
-      echo "  --parallel 3   : Run safely on Android"
-      echo "  --timeout 4    : Fast timeouts"
+      echo "Luphahla 4-Method Scanner (Safe for Termux)"
+      echo "  Methods: GET, HEAD, CONNECT, POST"
       exit 0
       ;;
-    *)
-      echo "Unknown option: $1" >&2
-      exit 2
-      ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
@@ -67,9 +60,10 @@ else
   BRIGHT_RED='\033[91m'; BRIGHT_GREEN='\033[92m'; BRIGHT_YELLOW='\033[93m'; BRIGHT_BLUE='\033[94m'; BRIGHT_CYAN='\033[96m'
 fi
 
-# ---------- Read stdin ----------
-cat > "$INPUT_FILE"
-TOTAL=$(grep -vE '^[[:space:]]*(#|$)' "$INPUT_FILE" | wc -l)
+# ---------- Read stdin (clean input) ----------
+# Remove blank lines and comments
+grep -vE '^[[:space:]]*(#|$)' > "$INPUT_FILE"
+TOTAL=$(wc -l < "$INPUT_FILE")
 if [ "$TOTAL" -eq 0 ]; then
   echo -e "${RED}No hosts provided.${RESET}" >&2
   exit 3
@@ -85,10 +79,10 @@ echo "  ██║     ██║   ██║██╔═══╝ ██╔══
 echo "  ███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║ "
 echo "  ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ "
 echo -e "${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}      T E R M U X   S A F E   S C A N N E R   📱${RESET}"
-echo -e "${CYAN}       Optimized to prevent Signal 9 (OOM Killer)${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}       4 - M E T H O D   S C A N N E R   📱${RESET}"
+echo -e "${CYAN}       GET • HEAD • CONNECT • POST${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
-echo -e "  ${YELLOW}Hosts:${RESET} ${BRIGHT_WHITE}$TOTAL${RESET}  ${YELLOW}Parallel:${RESET} ${BRIGHT_WHITE}$PARALLEL${RESET}  ${YELLOW}Timeout:${RESET} ${BRIGHT_WHITE}${TIMEOUT}s${RESET}"
+echo -e "  ${YELLOW}Hosts:${RESET} ${BRIGHT_WHITE}$TOTAL${RESET}  ${YELLOW}Methods:${RESET} ${BRIGHT_WHITE}4${RESET}  ${YELLOW}Parallel:${RESET} ${BRIGHT_WHITE}$PARALLEL${RESET}  ${YELLOW}Timeout:${RESET} ${BRIGHT_WHITE}${TIMEOUT}s${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
 echo ""
 
@@ -105,42 +99,47 @@ check_tls() {
 export -f check_tls _timeout
 export TIMEOUT
 
-# ---------- Probe only 10 methods ----------
+# ---------- Probe only 4 methods ----------
 probe_methods() {
   local host="$1"
   local port="$2"
   local allowed=()
   local status
-  for method in "${USEFUL_METHODS[@]}"; do
+
+  for method in "GET" "HEAD" "CONNECT" "POST"; do
     if [[ "$port" =~ ^(443|8443)$ ]]; then
       status=$(curl -s -k -o /dev/null -w "%{http_code}" -X "$method" "https://${host}:${port}" 2>/dev/null)
     else
       status=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" "http://${host}:${port}" 2>/dev/null)
     fi
+    # 200, 301, 302, 401, 405 means the server accepts the method
     if [[ "$status" =~ ^(200|301|302|401|405)$ ]]; then
       allowed+=("$method")
     fi
   done
+
+  # Return space-separated list
   echo "${allowed[*]}"
 }
-export -f probe_methods _timeout
+export -f probe_methods
 
 # ---------- Scan ----------
-echo -e "${BLUE}${BOLD}[*] Scanning (low memory mode)...${RESET}"
+echo -e "${BLUE}${BOLD}[*] Scanning (sequential, 4 methods)...${RESET}"
 COUNT=0
 : > "$RESULTS_FILE"
 
-# Use while loop with xargs but low parallel count
-grep -vE '^[[:space:]]*(#|$)' "$INPUT_FILE" | while read -r host; do
+while IFS= read -r host; do
+  [[ "$host" =~ ^[[:space:]]*# ]] && continue
+  [ -z "$host" ] && continue
   COUNT=$((COUNT + 1))
   printf "\r  ${CYAN}Progress: ${WHITE}%d/$TOTAL${RESET}" "$COUNT"
-  
+
   if check_tls "$host" 443; then
-    # Get server
+    # Server header
     server=$(curl -s -I -m "$TIMEOUT" -k "https://${host}:443" 2>/dev/null | grep -i "^Server:" | head -1 | cut -d' ' -f2- | head -c 25)
     [ -z "$server" ] && server="Unknown"
-    
-    # Speed
+
+    # Speed test
     speed_bytes=$(curl -s -o /dev/null -w "%{speed_download}" -m "$TIMEOUT" -k "https://${host}:443" 2>/dev/null)
     speed_label="N/A"
     if [[ "$speed_bytes" =~ ^[0-9]+ ]] && [ "$speed_bytes" -gt 0 ]; then
@@ -149,26 +148,29 @@ grep -vE '^[[:space:]]*(#|$)' "$INPUT_FILE" | while read -r host; do
         if [ "$speed_kb" -gt 100 ]; then speed_label="⚡ ${speed_kb} KB/s"; else speed_label="🐢 ${speed_kb} KB/s"; fi
       fi
     fi
-    
+
     # Methods
     methods_string=""
     best_method=""
     if [ "$METHOD_SCAN" = true ]; then
       methods_string=$(probe_methods "$host" "443")
-      # Pick best obscure method
-      for m in PROPFIND LOCK UNLOCK MKCOL MOVE; do
-        if echo "$methods_string" | grep -q "\b$m\b"; then
-          best_method="$m"
-          break
-        fi
-      done
-      [ -z "$best_method" ] && best_method=$(echo "$methods_string" | cut -d' ' -f1)
-      [ -z "$best_method" ] && best_method="None"
+      # Pick the best: CONNECT > POST > HEAD > GET (CONNECT is rarest and often unthrottled)
+      if echo "$methods_string" | grep -q "\bCONNECT\b"; then
+        best_method="CONNECT"
+      elif echo "$methods_string" | grep -q "\bPOST\b"; then
+        best_method="POST"
+      elif echo "$methods_string" | grep -q "\bHEAD\b"; then
+        best_method="HEAD"
+      elif echo "$methods_string" | grep -q "\bGET\b"; then
+        best_method="GET"
+      else
+        best_method="None"
+      fi
     fi
-    
+
     echo "${host}|443|✓|${server}|${methods_string}|${speed_label}|${best_method}" >> "$RESULTS_FILE"
   fi
-done
+done < "$INPUT_FILE"
 
 echo "" # newline
 
@@ -182,29 +184,29 @@ if [ "$LIVECOUNT" -eq 0 ]; then
 fi
 
 echo ""
-echo -e "${BRIGHT_GREEN}${BOLD}  ╔══════════════════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ║                    L I V E   H O S T S   T A B L E                 ║${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ╚══════════════════════════════════════════════════════════════════════╝${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║                             L I V E   H O S T S   T A B L E                                          ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝${RESET}"
 echo ""
 
-printf "  ${BRIGHT_CYAN}%3s${RESET} | ${BRIGHT_CYAN}%-20s${RESET} | ${BRIGHT_CYAN}%4s${RESET} | ${BRIGHT_CYAN}%3s${RESET} | ${BRIGHT_CYAN}%-8s${RESET} | ${BRIGHT_CYAN}%-20s${RESET} | ${BRIGHT_CYAN}%-7s${RESET} | ${BRIGHT_CYAN}%-12s${RESET}\n" " # " "Host" "Port" "TLS" "Server" "Methods (allowed)" "Speed" "Best Method"
-printf "  %3s | %-20s | %4s | %3s | %-8s | %-20s | %-7s | %-12s\n" "---" "--------------------" "----" "---" "--------" "--------------------" "-------" "------------"
+printf "  ${BRIGHT_CYAN}%3s${RESET} | ${BRIGHT_CYAN}%-20s${RESET} | ${BRIGHT_CYAN}%4s${RESET} | ${BRIGHT_CYAN}%3s${RESET} | ${BRIGHT_CYAN}%-10s${RESET} | ${BRIGHT_CYAN}%-15s${RESET} | ${BRIGHT_CYAN}%-8s${RESET} | ${BRIGHT_CYAN}%-12s${RESET}\n" " # " "Host" "Port" "TLS" "Server" "Methods" "Speed" "Best"
+printf "  %3s | %-20s | %4s | %3s | %-10s | %-15s | %-8s | %-12s\n" "---" "--------------------" "----" "---" "----------" "---------------" "--------" "------------"
 
 LINE_NUM=1
 while IFS='|' read -r host port tls server methods speed best; do
   host=$(echo "$host" | xargs)
-  server=$(echo "$server" | xargs)
+  server=$(echo "$server" | xargs | cut -c1-10)
   speed=$(echo "$speed" | xargs)
   methods=$(echo "$methods" | xargs)
   best=$(echo "$best" | xargs)
-  
+
   if [ "$best" != "None" ] && [ -n "$best" ]; then
     best_colored="${BRIGHT_GREEN}${BOLD}${best}${RESET}"
   else
     best_colored="${DIM}None${RESET}"
   fi
-  
-  printf "  ${YELLOW}%3d${RESET} | ${CYAN}%-20s${RESET} | ${BRIGHT_WHITE}%4s${RESET} | ${GREEN}%3s${RESET} | ${WHITE}%-8s${RESET} | ${DIM}%-20s${RESET} | ${BRIGHT_YELLOW}%-7s${RESET} | %-12s\n" "$LINE_NUM" "$host" "$port" "$tls" "$server" "$methods" "$speed" "$best_colored"
+
+  printf "  ${YELLOW}%3d${RESET} | ${CYAN}%-20s${RESET} | ${BRIGHT_WHITE}%4s${RESET} | ${GREEN}%3s${RESET} | ${WHITE}%-10s${RESET} | ${DIM}%-15s${RESET} | ${BRIGHT_YELLOW}%-8s${RESET} | %-12s\n" "$LINE_NUM" "$host" "$port" "$tls" "$server" "$methods" "$speed" "$best_colored"
   LINE_NUM=$((LINE_NUM + 1))
 done < "$RESULTS_FILE"
 
