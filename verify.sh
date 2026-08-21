@@ -24,9 +24,6 @@ while [[ $# -gt 0 ]]; do
     --analyze)   ANALYZE_MODE=true ;;
     --help)
       echo "Usage: cat hosts.txt | $0 [--timeout 3] [--min-speed 50] [--vpn] [--analyze]"
-      echo "  --min-speed : minimum speed for 'fast' (default 50)"
-      echo "  --vpn       : strict VPN filters (CONNECT, latency, server header)"
-      echo "  --analyze   : show all zero‑rated hosts with status: FREE, THROTTLED, or BLOCKED"
       exit 0
       ;;
     *) echo "Unknown option"; exit 2 ;;
@@ -44,8 +41,6 @@ R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37
 # ============================
 INPUT=$(mktemp)
 trap 'rm -f "$INPUT"' EXIT
-
-# Read all lines, then split each line by spaces into separate entries
 cat /dev/stdin | tr ' ' '\n' | grep -vE '^[[:space:]]*(#|$)' > "$INPUT"
 TOTAL=$(wc -l < "$INPUT")
 [[ $TOTAL -eq 0 ]] && { echo -e "${Y}No hosts.${R}" >&2; exit 3; }
@@ -108,7 +103,6 @@ COUNT=0; FOUND=0
 while IFS= read -r host; do
   ((COUNT++)); update_spinner
 
-  # Only zero‑rated hosts
   if ! is_free "$host"; then continue; fi
 
   # Try methods
@@ -137,7 +131,7 @@ while IFS= read -r host; do
     fi
   done
 
-  # --- CLASSIFY STATUS ---
+  # --- CLASSIFY STATUS (single variable) ---
   if [[ "$SUCCESS" == false ]]; then
     STATUS="BLOCKED"
     SPEED_DISPLAY="N/A"
@@ -145,7 +139,7 @@ while IFS= read -r host; do
     IP_USED="N/A"
     LATENCY_DISPLAY="N/A"
   else
-    # Speed display: fix "OKB/s" -> "0KB/s"
+    # Speed display
     if (( SPEED_KB == 0 )); then
       SPEED_DISPLAY="0KB/s"
     elif (( SPEED_KB > 100 )); then
@@ -180,7 +174,7 @@ while IFS= read -r host; do
     VPN_STATUS=""
   fi
 
-  # Print row
+  # Print row – only one STATUS placeholder
   printf "\r  %-70s\r" ""
 
   if [[ "$ANALYZE_MODE" == true ]]; then
@@ -196,7 +190,7 @@ while IFS= read -r host; do
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${W}%-10s${R}  ${G}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$LATENCY_DISPLAY" "$VPN_STATUS"
     fi
   else
-    # Standard mode: only fast hosts
+    # Standard mode
     printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY"
   fi
 
