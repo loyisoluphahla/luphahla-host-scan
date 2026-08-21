@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Luphahla Host Scan - BugScanX Style with Expanded Zero‑Rated Detection (including Elon)
-# FIXED: printf error, better table formatting
+# Luphahla Host Scan - Zero-Rated Scanner (Loyiso Edition)
+# BugScanX style table with expanded zero-rated detection.
 
 set -o pipefail
 
@@ -22,7 +22,7 @@ fi
 
 # ---------- Defaults ----------
 USE_COLOR=true
-TIMEOUT=4
+TIMEOUT=3
 PARALLEL=5
 OUTPUT_FILE=""
 INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/verify-input.XXXXXX")
@@ -40,7 +40,10 @@ while [ $# -gt 0 ]; do
     --parallel)      PARALLEL="$2"; shift ;;
     -o)              OUTPUT_FILE="$2"; shift ;;
     --help|-h)
-      echo "Luphahla BugScanX Scanner (Expanded Detection + Elon)"
+      echo "Luphahla BugScanX Scanner"
+      echo "  --timeout 3   : Timeout per request"
+      echo "  --parallel 5  : Parallel jobs"
+      echo "  -o out.txt    : Save results"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -57,7 +60,7 @@ else
   BRIGHT_RED='\033[91m'; BRIGHT_GREEN='\033[92m'; BRIGHT_YELLOW='\033[93m'; BRIGHT_BLUE='\033[94m'; BRIGHT_CYAN='\033[96m'
 fi
 
-# ---------- Read stdin ----------
+# ---------- Read stdin (clean input) ----------
 grep -vE '^[[:space:]]*(#|$)' > "$INPUT_FILE"
 TOTAL=$(wc -l < "$INPUT_FILE")
 if [ "$TOTAL" -eq 0 ]; then
@@ -75,7 +78,8 @@ echo "  ██║     ██║   ██║██╔═══╝ ██╔══
 echo "  ███████╗╚██████╔╝██║     ██║  ██║██║  ██║██║  ██║███████╗██║  ██║ "
 echo "  ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ "
 echo -e "${RESET}"
-echo -e "${BRIGHT_BLUE}${BOLD}     E X P A N D E D   Z E R O - R A T E D   D E T E C T I O N   +   E L O N   🚀${RESET}"
+echo -e "${BRIGHT_BLUE}${BOLD}        L U P H A H L A   S C A N N E R   🚀${RESET}"
+echo -e "${CYAN}       GET • HEAD • CONNECT • POST  (Best method selected)${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
 echo -e "  ${YELLOW}Hosts:${RESET} ${BRIGHT_WHITE}$TOTAL${RESET}  ${YELLOW}Parallel:${RESET} ${BRIGHT_WHITE}$PARALLEL${RESET}  ${YELLOW}Timeout:${RESET} ${BRIGHT_WHITE}${TIMEOUT}s${RESET}"
 echo -e "${DIM}           ───────────────────────────────────────────────${RESET}"
@@ -94,39 +98,29 @@ check_tls() {
 export -f check_tls _timeout
 export TIMEOUT
 
-# ---------- Expanded Zero‑Rating Detection ----------
+# ---------- Zero‑rated detection ----------
 detect_zero_rated() {
   local host="$1"
   local server="$2"
   local combined="$host $server"
   combined=$(echo "$combined" | tr '[:upper:]' '[:lower:]')
 
+  # Massive list of known zero‑rated providers
   patterns=(
-    # Google / Alphabet
     "google" "youtube" "gmail" "android" "play" "chrome" "gstatic" "googleapis"
-    # Meta
     "facebook" "meta" "whatsapp" "instagram" "fbcdn" "messenger" "threads"
-    # Twitter / X
     "twitter" "x.com" "twimg" "t.co"
-    # Elon Musk companies
-    "tesla" "spacex" "starlink" "neuralink" "boringcompany" "xai"
-    # Other social / messaging
+    "tesla" "spacex" "starlink" "neuralink"
     "snapchat" "telegram" "signal" "line" "wechat" "discord" "slack" "zoom" "reddit" "pinterest" "linkedin"
     "tumblr" "viber" "imo" "skype"
-    # Streaming / Media
     "netflix" "spotify" "hulu" "vimeo" "dailymotion" "twitch" "soundcloud" "pandora" "tidal"
-    # CDNs
     "cloudflare" "akamai" "fastly" "cloudfront" "varnish" "incapsula" "sucuri" "stackpath" "edgecast"
-    # Cloud providers
     "amazon" "aws" "azure" "google cloud" "oracle cloud" "ibm cloud" "digitalocean" "vultr" "linode"
-    # Major tech
     "apple" "icloud" "microsoft" "office" "live" "outlook" "bing" "yahoo" "aol" "msn"
-    # African ISPs
     "econet" "netone" "mtn" "vodacom" "orange" "airtel" "safaricom" "liquid" "telkom" "zol"
-    # Other big names
     "github" "stackoverflow" "wordpress" "blogger" "medium" "wix" "squarespace"
     "shopify" "etsy" "alibaba" "alipay" "tencent" "baidu" "weibo" "yandex"
-    "naver" "kakao" "line"
+    "naver" "kakao"
   )
 
   for pattern in "${patterns[@]}"; do
@@ -137,8 +131,9 @@ detect_zero_rated() {
   done
   echo "UNKNOWN"
 }
+export -f detect_zero_rated
 
-# ---------- Scan a host ----------
+# ---------- Scan a single host ----------
 scan_host() {
   local host="$1"
   local port=443
@@ -151,7 +146,6 @@ scan_host() {
   local best_code=""
   local best_server=""
   local best_ip=""
-  local speed_kb=0
   local speed_label="N/A"
   local zero_label="UNKNOWN"
 
@@ -167,7 +161,7 @@ scan_host() {
       [ -z "$server" ] && server="Unknown"
 
       if [[ "$speed_bytes" =~ ^[0-9]+ ]] && [ "$speed_bytes" -gt 0 ]; then
-        speed_kb=$(echo "$speed_bytes / 1024" | bc 2>/dev/null)
+        local speed_kb=$(echo "$speed_bytes / 1024" | bc 2>/dev/null)
         if [ -n "$speed_kb" ]; then
           if [ "$speed_kb" -gt 100 ]; then speed_label="⚡ ${speed_kb} KB/s"; else speed_label="🐢 ${speed_kb} KB/s"; fi
         else
@@ -202,26 +196,18 @@ scan_host() {
 export -f scan_host check_tls _timeout detect_zero_rated
 export TIMEOUT METHODS
 
-# ---------- Run scan ----------
+# ---------- Run the scan ----------
 echo -e "${BLUE}${BOLD}[*] Scanning hosts (${PARALLEL} parallel)...${RESET}"
-COUNT=0
 : > "$RESULTS_FILE"
 
 if [ "$PARALLEL" -gt 1 ] && command -v xargs >/dev/null && xargs --help 2>&1 | grep -q -- '-P'; then
   grep -vE '^[[:space:]]*(#|$)' "$INPUT_FILE" | \
     xargs -P "$PARALLEL" -I {} bash -c '
       scan_host "$1"
-    ' _ {} > "$RESULTS_FILE" 2>/dev/null &
-  local pid=$!
-  local spin='⣾⣽⣻⢿⡿⣟⣯⣷'
-  local i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    printf "\r  ${CYAN}${spin:i++%${#spin}:1}${RESET} Scanning..."
-    sleep 0.1
-  done
-  wait "$pid"
-  printf "\r  ${GREEN}✓${RESET} Scan complete.                    \n"
+    ' _ {} > "$RESULTS_FILE" 2>/dev/null
 else
+  # Sequential fallback
+  local COUNT=0
   while IFS= read -r host; do
     [[ "$host" =~ ^[[:space:]]*# ]] && continue
     [ -z "$host" ] && continue
@@ -232,8 +218,10 @@ else
   echo ""
 fi
 
+echo -e "  ${GREEN}✓${RESET} Scan complete."
+
 # ============================================================
-#  DISPLAY TABLE (FIXED)
+#  DISPLAY TABLE
 # ============================================================
 LIVECOUNT=$(wc -l < "$RESULTS_FILE")
 if [ "$LIVECOUNT" -eq 0 ]; then
@@ -243,7 +231,7 @@ fi
 
 echo ""
 echo -e "${BRIGHT_GREEN}${BOLD}  ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ║                            L I V E   H O S T S   T A B L E                                                                                ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║                            L I V E   H O S T S   T A B L E   (Zero‑Rated Checked)                            ║${RESET}"
 echo -e "${BRIGHT_GREEN}${BOLD}  ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝${RESET}"
 echo ""
 
@@ -274,14 +262,13 @@ while IFS='|' read -r host ip port method code server speed zero; do
     zero_colored="${DIM}❓ Unknown${RESET}"
   fi
 
-  # FIXED: Use %s for all string fields to avoid "invalid number" error
   printf "  ${YELLOW}%3d${RESET} | ${CYAN}%-25s${RESET} | ${WHITE}%-15s${RESET} | ${BRIGHT_WHITE}%4s${RESET} | ${BRIGHT_BLUE}%-8s${RESET} | ${code_colored}%4s${RESET} | ${DIM}%-12s${RESET} | %-10s | ${zero_colored}\n" "$LINE_NUM" "$host" "$ip" "$port" "$method" "$code" "$server" "$speed" "$zero"
   LINE_NUM=$((LINE_NUM + 1))
 done < "$RESULTS_FILE"
 
 echo ""
 echo -e "  ${GREEN}✓${RESET} Total live hosts: ${BRIGHT_WHITE}$LIVECOUNT${RESET}"
-echo -e "  ${GREEN}✓${RESET} ✅ FREE = matches known zero‑rated patterns (including Elon Musk's companies)."
+echo -e "  ${GREEN}✓${RESET} ✅ FREE = matches known zero‑rated patterns."
 
 if [ -n "$OUTPUT_FILE" ]; then
   cp "$RESULTS_FILE" "$OUTPUT_FILE"
