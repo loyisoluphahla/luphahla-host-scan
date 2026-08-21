@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Luphahla Scanner – Simple Table (Host, Method, IP)
+# Luphahla Scanner – Simple Table with Spinner
 # Usage: cat hosts.txt | ./verify.sh [--timeout 3]
 
 set -o pipefail
 
 # Defaults
 TIMEOUT=3
-METHODS=("CONNECT" "POST" "HEAD" "GET")  # Order of preference
+METHODS=("CONNECT" "POST" "HEAD" "GET")
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Colors (safe for Termux)
+# Colors
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'
 
 # Read stdin
@@ -47,15 +47,27 @@ echo -e "${BG}${G}         L U P H A H L A   Z E R O - R A T E D   H O S T S    
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════${R}"
 echo ""
 
-# Scan and print table
-COUNT=0
-FOUND=0
+# Table headers
 printf "  ${C}%-26s  %-10s  %-15s${R}\n" "HOST" "METHOD" "IP"
 printf "  %-26s  %-10s  %-15s\n" "--------------------------" "----------" "---------------"
 
+# Spinner chars
+SPINNER=('|' '/' '-' '\')
+SPIN_IDX=0
+
+# Function to update spinner (prints over the same line)
+update_spinner() {
+  printf "\r  ${C}%s${R} Scanning..." "${SPINNER[SPIN_IDX]}"
+  ((SPIN_IDX++))
+  [[ $SPIN_IDX -ge ${#SPINNER[@]} ]] && SPIN_IDX=0
+}
+
+# Scan loop
+COUNT=0
+FOUND=0
 while IFS= read -r host; do
   ((COUNT++))
-  printf "\r${C}Progress:${R} %d/%d" "$COUNT" "$TOTAL"
+  update_spinner
 
   # Skip if not zero‑rated
   if ! is_free "$host"; then
@@ -69,7 +81,8 @@ while IFS= read -r host; do
     ip=$(echo "$output" | cut -d'|' -f2)
     [[ -z "$ip" ]] && ip="N/A"
     if [[ "$code" =~ ^(200|301|302|401|405)$ ]]; then
-      # Color: green if zero‑rated, yellow if unknown but we already know it's zero‑rated
+      # Clear the spinner line before printing the result
+      printf "\r  %-50s\r" ""
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}\n" "$host" "$method" "$ip"
       ((FOUND++))
       break
@@ -77,6 +90,7 @@ while IFS= read -r host; do
   done
 done < "$INPUT"
 
-echo ""  # newline after progress bar
+# Final newline and summary
+printf "\r  %-50s\r" ""
 echo ""
 echo -e "${G}✓${R} Total zero‑rated hosts found: ${C}$FOUND${R}"
