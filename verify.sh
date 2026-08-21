@@ -40,11 +40,13 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
-# READ STDIN
+# READ STDIN – SPLIT ON SPACES
 # ============================
 INPUT=$(mktemp)
 trap 'rm -f "$INPUT"' EXIT
-grep -vE '^[[:space:]]*(#|$)' > "$INPUT"
+
+# Read all lines, then split each line by spaces into separate entries
+cat /dev/stdin | tr ' ' '\n' | grep -vE '^[[:space:]]*(#|$)' > "$INPUT"
 TOTAL=$(wc -l < "$INPUT")
 [[ $TOTAL -eq 0 ]] && { echo -e "${Y}No hosts.${R}" >&2; exit 3; }
 
@@ -76,7 +78,7 @@ fi
 echo ""
 
 # ============================
-# TABLE HEADERS (determined by mode)
+# TABLE HEADERS
 # ============================
 if [[ "$ANALYZE_MODE" == true ]]; then
   printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-10s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS"
@@ -109,8 +111,7 @@ while IFS= read -r host; do
   # Only zero‑rated hosts
   if ! is_free "$host"; then continue; fi
 
-  # Try methods in order, but we only need one that gives any response
-  # For analyze mode, we also need to detect BLOCKED (no response from any method)
+  # Try methods
   SUCCESS=false
   SPEED_KB=0
   LATENCY=999.0
@@ -132,7 +133,7 @@ while IFS= read -r host; do
       IP_USED="$ip"
       LATENCY="$latency"
       [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
-      break  # stop at first working method
+      break
     fi
   done
 
@@ -144,11 +145,16 @@ while IFS= read -r host; do
     IP_USED="N/A"
     LATENCY_DISPLAY="N/A"
   else
-    # Speed display
-    if (( SPEED_KB > 100 )); then SPEED_DISPLAY="⚡${SPEED_KB}KB/s"; else SPEED_DISPLAY="🐢${SPEED_KB}KB/s"; fi
+    # Speed display: fix "OKB/s" -> "0KB/s"
+    if (( SPEED_KB == 0 )); then
+      SPEED_DISPLAY="0KB/s"
+    elif (( SPEED_KB > 100 )); then
+      SPEED_DISPLAY="⚡${SPEED_KB}KB/s"
+    else
+      SPEED_DISPLAY="🐢${SPEED_KB}KB/s"
+    fi
     LATENCY_DISPLAY=$(printf "%.2f" "$LATENCY")s
 
-    # Determine status
     if (( SPEED_KB >= MIN_SPEED )); then
       STATUS="FREE (fast)"
     else
@@ -157,14 +163,13 @@ while IFS= read -r host; do
   fi
 
   # --- FILTERING ---
-  # If NOT analyze mode, skip slow hosts
   if [[ "$ANALYZE_MODE" == false ]]; then
     if [[ "$STATUS" == "BLOCKED" || "$STATUS" == "THROTTLED" ]]; then
       continue
     fi
   fi
 
-  # VPN mode: additional filters (only if not blocked and not analyze? VPN mode usually only cares about fast hosts)
+  # VPN mode extra filters
   if [[ "$VPN_MODE" == true && "$STATUS" != "BLOCKED" ]]; then
     [[ "$METHOD_USED" != "CONNECT" ]] && continue
     (( $(echo "$LATENCY > 1.5" | bc -l) )) && continue
@@ -179,7 +184,6 @@ while IFS= read -r host; do
   printf "\r  %-70s\r" ""
 
   if [[ "$ANALYZE_MODE" == true ]]; then
-    # Color status
     case "$STATUS" in
       "FREE (fast)") STATUS_COLOR="${G}${STATUS}${R}" ;;
       "THROTTLED")   STATUS_COLOR="${Y}${STATUS}${R}" ;;
@@ -190,11 +194,9 @@ while IFS= read -r host; do
   elif [[ "$VPN_MODE" == true ]]; then
     if (( SPEED_KB >= MIN_SPEED )); then
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${W}%-10s${R}  ${G}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$LATENCY_DISPLAY" "$VPN_STATUS"
-    else
-      continue  # skip slow hosts in VPN mode
     fi
   else
-    # Standard mode: already filtered to fast hosts only
+    # Standard mode: only fast hosts
     printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY"
   fi
 
