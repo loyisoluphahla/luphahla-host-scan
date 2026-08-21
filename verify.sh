@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Luphahla Scanner – Zero‑Rated Host Checker
-# Usage: cat hosts.txt | ./verify.sh [--timeout 3] [--min-speed 10] [--vpn]
+# Luphahla Scanner – Zero‑Rated Host Checker with Protocol Filters
+# Usage: cat hosts.txt | ./verify.sh [--timeout 3] [--min-speed 10] [--vpn] [--tls13] [--http2]
 
 set -o pipefail
 
@@ -8,6 +8,8 @@ set -o pipefail
 TIMEOUT=3
 MIN_SPEED=10
 VPN_MODE=false
+TLS13_MODE=false
+HTTP2_MODE=false
 METHODS=("CONNECT" "POST" "HEAD" "GET")
 
 # Parse args
@@ -16,7 +18,15 @@ while [[ $# -gt 0 ]]; do
     --timeout) TIMEOUT="$2"; shift ;;
     --min-speed) MIN_SPEED="$2"; shift ;;
     --vpn) VPN_MODE=true ;;
-    --help) echo "Usage: cat hosts.txt | $0 [--timeout 3] [--min-speed 10] [--vpn]"; exit 0 ;;
+    --tls13) TLS13_MODE=true ;;
+    --http2) HTTP2_MODE=true ;;
+    --help) 
+      echo "Usage: cat hosts.txt | $0 [--timeout 3] [--min-speed 10] [--vpn] [--tls13] [--http2]"
+      echo "  --vpn       : strict filters: CONNECT method, speed≥50KB/s, latency≤1.5s, valid Server"
+      echo "  --tls13     : only show hosts that support TLS 1.3"
+      echo "  --http2     : only show hosts that support HTTP/2"
+      exit 0
+      ;;
     *) echo "Unknown option"; exit 2 ;;
   esac
   shift
@@ -52,17 +62,33 @@ clear
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
 echo -e "${BG}${G}         L U P H A H L A   Z E R O - R A T E D   H O S T S            ${R}"
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
-[[ "$VPN_MODE" == true ]] && echo -e "  ${C}Mode:${R} VPN-ELIGIBLE (strict)" || echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s)"
+mode_str="STANDARD (speed ≥ ${MIN_SPEED} KB/s)"
+[[ "$VPN_MODE" == true ]] && mode_str="VPN-ELIGIBLE (strict)"
+[[ "$TLS13_MODE" == true ]] && mode_str+=" + TLS 1.3"
+[[ "$HTTP2_MODE" == true ]] && mode_str+=" + HTTP/2"
+echo -e "  ${C}Mode:${R} ${mode_str}"
 echo ""
 
-# Headers
+# Determine table headers
 if [[ "$VPN_MODE" == true ]]; then
-  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-10s  %-8s${R}\n" "HOST" "METHOD" "IP" "SPEED" "LATENCY" "STATUS"
-  printf "  %-26s  %-10s  %-15s  %-10s  %-10s  %-8s\n" "--------------------------" "----------" "---------------" "----------" "----------" "--------"
+  headers=("HOST" "METHOD" "IP" "SPEED" "LATENCY" "TLS" "HTTP/2" "STATUS")
+  header_line="  ${C}%-26s  %-10s  %-15s  %-10s  %-10s  %-5s  %-6s  %-8s${R}"
+  divider_line="  %-26s  %-10s  %-15s  %-10s  %-10s  %-5s  %-6s  %-8s"
+  format="  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${W}%-10s${R}  %-5s  %-6s  ${G}%-8s${R}"
+elif [[ "$TLS13_MODE" == true || "$HTTP2_MODE" == true ]]; then
+  headers=("HOST" "METHOD" "IP" "SPEED" "TLS" "HTTP/2")
+  header_line="  ${C}%-26s  %-10s  %-15s  %-10s  %-5s  %-6s${R}"
+  divider_line="  %-26s  %-10s  %-15s  %-10s  %-5s  %-6s"
+  format="  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  %-5s  %-6s"
 else
-  printf "  ${C}%-26s  %-10s  %-15s  %-10s${R}\n" "HOST" "METHOD" "IP" "SPEED"
-  printf "  %-26s  %-10s  %-15s  %-10s\n" "--------------------------" "----------" "---------------" "----------"
+  headers=("HOST" "METHOD" "IP" "SPEED")
+  header_line="  ${C}%-26s  %-10s  %-15s  %-10s${R}"
+  divider_line="  %-26s  %-10s  %-15s  %-10s"
+  format="  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}"
 fi
+
+printf "$header_line" "${headers[@]}"
+printf "$divider_line" "--------------------------" "----------" "---------------" "----------" "----------" "-----" "------" "--------" | cut -c1-90
 
 # Spinner
 SPINNER=('|' '/' '-' '\')
@@ -72,6 +98,30 @@ update_spinner() {
   ((SPIN_IDX++)); [[ $SPIN_IDX -ge ${#SPINNER[@]} ]] && SPIN_IDX=0
 }
 
+# Helper: check TLS version
+check_tls_version() {
+  local host="$1"
+  local version=""
+  if timeout 2 openssl s_client -connect "$host:443" -tls1_3 -verify_quiet -brief </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
+    version="1.3"
+  elif timeout 2 openssl s_client -connect "$host:443" -tls1_2 -verify_quiet -brief </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
+    version="1.2"
+  else
+    version="❌"
+  fi
+  echo "$version"
+}
+
+# Helper: check HTTP/2 support
+check_http2() {
+  local host="$1"
+  if curl -s -k --http2 -I -m 2 "https://$host" 2>/dev/null | grep -q "HTTP/2"; then
+    echo "✅"
+  else
+    echo "❌"
+  fi
+}
+
 # Scan loop
 COUNT=0; FOUND=0
 while IFS= read -r host; do
@@ -79,8 +129,23 @@ while IFS= read -r host; do
 
   if ! is_free "$host"; then continue; fi
 
+  # Pre-check TLS/HTTP2 if needed (but only once per host)
+  tls_version=""
+  http2_support=""
+  if [[ "$TLS13_MODE" == true || "$HTTP2_MODE" == true || "$VPN_MODE" == true ]]; then
+    tls_version=$(check_tls_version "$host")
+    http2_support=$(check_http2 "$host")
+    # If TLS13_MODE is on, skip if not 1.3
+    if [[ "$TLS13_MODE" == true && "$tls_version" != "1.3" ]]; then
+      continue
+    fi
+    # If HTTP2_MODE is on, skip if not supported
+    if [[ "$HTTP2_MODE" == true && "$http2_support" != "✅" ]]; then
+      continue
+    fi
+  fi
+
   for method in "${METHODS[@]}"; do
-    # Capture code, IP, speed, latency
     output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}|%{time_total}" -X "$method" -m "$TIMEOUT" "https://$host" 2>/dev/null)
     code=$(echo "$output" | cut -d'|' -f1)
     ip=$(echo "$output" | cut -d'|' -f2)
@@ -95,16 +160,9 @@ while IFS= read -r host; do
 
       # VPN Mode: extra filters
       if [[ "$VPN_MODE" == true ]]; then
-        # Must have CONNECT method (if method is CONNECT, priority given)
-        if [[ "$method" != "CONNECT" ]]; then
-          # Only allow CONNECT for VPN, skip others
-          continue
-        fi
-        # Speed filter
+        [[ "$method" != "CONNECT" ]] && continue
         (( speed_kb < MIN_SPEED )) && continue
-        # Latency filter
         (( $(echo "$latency > 1.5" | bc -l) )) && continue
-        # Server header filter
         server=$(curl -s -I -k -m 2 "https://$host" 2>/dev/null | grep -i "^Server:" | head -1)
         [[ -z "$server" || "$server" == *"Unknown"* ]] && continue
         status="✅ PASS"
@@ -117,11 +175,16 @@ while IFS= read -r host; do
       if (( speed_kb > 100 )); then speed_display="⚡${speed_kb}KB/s"; else speed_display="🐢${speed_kb}KB/s"; fi
       latency_display=$(printf "%.2f" "$latency")s
 
-      printf "\r  %-70s\r" ""
+      # Clear spinner line
+      printf "\r  %-80s\r" ""
+
+      # Print based on mode
       if [[ "$VPN_MODE" == true ]]; then
-        printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${W}%-10s${R}  ${G}%-8s${R}\n" "$host" "$method" "$ip" "$speed_display" "$latency_display" "$status"
+        printf "$format" "$host" "$method" "$ip" "$speed_display" "$latency_display" "$tls_version" "$http2_support" "$status"
+      elif [[ "$TLS13_MODE" == true || "$HTTP2_MODE" == true ]]; then
+        printf "$format" "$host" "$method" "$ip" "$speed_display" "$tls_version" "$http2_support"
       else
-        printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}\n" "$host" "$method" "$ip" "$speed_display"
+        printf "$format" "$host" "$method" "$ip" "$speed_display"
       fi
       ((FOUND++))
       break
@@ -129,7 +192,7 @@ while IFS= read -r host; do
   done
 done < "$INPUT"
 
-printf "\r  %-70s\r" ""
+printf "\r  %-80s\r" ""
 echo ""
 echo -e "${G}✓${R} Found: ${C}$FOUND${R} hosts"
 [[ "$VPN_MODE" == true ]] && echo -e "  ${C}VPN-ELIGIBLE criteria:${R} speed ≥ 50 KB/s, latency ≤ 1.5s, CONNECT method, valid Server header."
