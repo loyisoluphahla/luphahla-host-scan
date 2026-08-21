@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Luphahla Scanner – Zero‑Rated Host Checker
-# Usage: cat hosts.txt | ./verify.sh [--timeout 3] [--min-speed 50] [--vpn] [--analyze]
+# Usage: cat hosts.txt | ./verify.sh [--timeout 4] [--min-speed 50] [--vpn] [--analyze]
 
 set -o pipefail
 
 # ============================
 # DEFAULTS
 # ============================
-TIMEOUT=3
+TIMEOUT=4                    # Default timeout increased to 4 seconds
 MIN_SPEED=50
 VPN_MODE=false
 ANALYZE_MODE=false
@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
     --vpn)       VPN_MODE=true ;;
     --analyze)   ANALYZE_MODE=true ;;
     --help)
-      echo "Usage: cat hosts.txt | $0 [--timeout 3] [--min-speed 50] [--vpn] [--analyze]"
+      echo "Usage: cat hosts.txt | $0 [--timeout 4] [--min-speed 50] [--vpn] [--analyze]"
       exit 0
       ;;
     *) echo "Unknown option"; exit 2 ;;
@@ -37,18 +37,19 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
-# READ STDIN – SPLIT ON SPACES, REMOVE DUPLICATES
+# READ STDIN – SPLIT, TRIM, DEDUPLICATE (CASE-INSENSITIVE)
 # ============================
 INPUT=$(mktemp)
 trap 'rm -f "$INPUT"' EXIT
 
-# Split by spaces, remove blanks, then sort unique
-cat /dev/stdin | tr ' ' '\n' | grep -vE '^[[:space:]]*(#|$)' | sort -u > "$INPUT"
+# Read stdin, split by spaces, trim spaces, convert to lowercase, then sort unique
+cat /dev/stdin | tr ' ' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -vE '^[[:space:]]*(#|$)' | tr '[:upper:]' '[:lower:]' | sort -u > "$INPUT"
+
 TOTAL=$(wc -l < "$INPUT")
 [[ $TOTAL -eq 0 ]] && { echo -e "${Y}No hosts.${R}" >&2; exit 3; }
 
 # ============================
-# ZERO‑RATED DETECTION
+# ZERO‑RATED DETECTION (case-insensitive)
 # ============================
 is_free() {
   local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
@@ -125,7 +126,7 @@ while IFS= read -r host; do
     [[ -z "$ip" ]] && ip="N/A"
     [[ -z "$latency" ]] && latency="999.0"
 
-    # If we got a valid HTTP code (not empty and not 000), consider it a success
+    # If we got a valid HTTP code (not empty and not 000)
     if [[ -n "$code" && "$code" != "000" ]]; then
       SUCCESS=true
       METHOD_USED="$method"
@@ -137,7 +138,7 @@ while IFS= read -r host; do
     fi
   done
 
-  # --- CLASSIFY STATUS (single variable) ---
+  # --- CLASSIFY STATUS (single variable, never concatenated) ---
   if [[ "$SUCCESS" == false ]]; then
     STATUS="BLOCKED"
     SPEED_DISPLAY="N/A"
@@ -145,7 +146,7 @@ while IFS= read -r host; do
     IP_USED="N/A"
     LATENCY_DISPLAY="N/A"
   else
-    # Speed display
+    # Speed display – fix "OKB/s" to "0KB/s"
     if (( SPEED_KB == 0 )); then
       SPEED_DISPLAY="0KB/s"
     elif (( SPEED_KB > 100 )); then
@@ -180,7 +181,7 @@ while IFS= read -r host; do
     VPN_STATUS=""
   fi
 
-  # Print row – only one STATUS
+  # Print row – only one STATUS placeholder, no duplication
   printf "\r  %-70s\r" ""
 
   if [[ "$ANALYZE_MODE" == true ]]; then
