@@ -37,11 +37,13 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
-# READ STDIN – SPLIT ON SPACES
+# READ STDIN – SPLIT ON SPACES, REMOVE DUPLICATES
 # ============================
 INPUT=$(mktemp)
 trap 'rm -f "$INPUT"' EXIT
-cat /dev/stdin | tr ' ' '\n' | grep -vE '^[[:space:]]*(#|$)' > "$INPUT"
+
+# Split by spaces, remove blanks, then sort unique
+cat /dev/stdin | tr ' ' '\n' | grep -vE '^[[:space:]]*(#|$)' | sort -u > "$INPUT"
 TOTAL=$(wc -l < "$INPUT")
 [[ $TOTAL -eq 0 ]] && { echo -e "${Y}No hosts.${R}" >&2; exit 3; }
 
@@ -103,6 +105,7 @@ COUNT=0; FOUND=0
 while IFS= read -r host; do
   ((COUNT++)); update_spinner
 
+  # Only zero‑rated hosts
   if ! is_free "$host"; then continue; fi
 
   # Try methods
@@ -111,6 +114,7 @@ while IFS= read -r host; do
   LATENCY=999.0
   METHOD_USED=""
   IP_USED="N/A"
+  HTTP_CODE=""
 
   for method in "${METHODS[@]}"; do
     output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}|%{time_total}" -X "$method" -m "$TIMEOUT" "https://$host" 2>/dev/null)
@@ -121,11 +125,13 @@ while IFS= read -r host; do
     [[ -z "$ip" ]] && ip="N/A"
     [[ -z "$latency" ]] && latency="999.0"
 
-    if [[ "$code" =~ ^(200|301|302|401|405)$ ]]; then
+    # If we got a valid HTTP code (not empty and not 000), consider it a success
+    if [[ -n "$code" && "$code" != "000" ]]; then
       SUCCESS=true
       METHOD_USED="$method"
       IP_USED="$ip"
       LATENCY="$latency"
+      HTTP_CODE="$code"
       [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
       break
     fi
@@ -174,7 +180,7 @@ while IFS= read -r host; do
     VPN_STATUS=""
   fi
 
-  # Print row – only one STATUS placeholder
+  # Print row – only one STATUS
   printf "\r  %-70s\r" ""
 
   if [[ "$ANALYZE_MODE" == true ]]; then
@@ -203,7 +209,7 @@ if [[ "$ANALYZE_MODE" == true ]]; then
   echo -e "${G}✓${R} Analysis complete. Found ${C}$FOUND${R} zero‑rated hosts."
   echo -e "  ${G}FREE (fast)${R}   : speed ≥ ${MIN_SPEED} KB/s"
   echo -e "  ${Y}THROTTLED${R}    : speed < ${MIN_SPEED} KB/s (ISP slowing)"
-  echo -e "  ${RD}BLOCKED${R}     : TLS handshake failed (ISP blocking)"
+  echo -e "  ${RD}BLOCKED${R}     : no HTTP response (ISP blocking)"
 else
   echo -e "${G}✓${R} Found: ${C}$FOUND${R} hosts (speed ≥ ${MIN_SPEED} KB/s)"
 fi
