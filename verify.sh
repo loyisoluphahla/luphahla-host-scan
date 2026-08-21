@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Luphahla Scanner - Simple & Reliable (No parallel, no xargs)
+# Luphahla Scanner - BugScanX style (uses curl for liveness)
 # Usage: cat hosts.txt | ./verify.sh [--timeout 3]
 
 set -o pipefail
 
 # ---------- Defaults ----------
-TIMEOUT=3
+TIMEOUT=4
 USE_COLOR=true
 
 # ---------- Parse arguments ----------
@@ -24,10 +24,10 @@ if [ "$USE_COLOR" = false ]; then
   RESET=''; BOLD=''; GREEN=''; YELLOW=''; CYAN=''; WHITE=''; BRIGHT_GREEN=''; BRIGHT_CYAN=''
 else
   RESET='\033[0m'; BOLD='\033[1m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; WHITE='\033[37m'
-  BRIGHT_GREEN='\033[92m'; BRIGHT_CYAN='\033[96m'
+  BRIGHT_GREEN='\033[92m'; BRIGHT_CYAN='\033[96m'; DIM='\033[2m'; RED='\033[31m'; BRIGHT_WHITE='\033[97m'
 fi
 
-# ---------- Read stdin (skip blank lines and comments) ----------
+# ---------- Read stdin ----------
 INPUT=$(mktemp)
 trap 'rm -f "$INPUT"' EXIT
 grep -vE '^[[:space:]]*(#|$)' > "$INPUT"
@@ -40,12 +40,12 @@ fi
 # ---------- Banner ----------
 clear
 echo -e "${BRIGHT_GREEN}${BOLD}  ╔══════════════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${BRIGHT_GREEN}${BOLD}  ║              L U P H A H L A   S C A N N E R  (Simple)          ║${RESET}"
+echo -e "${BRIGHT_GREEN}${BOLD}  ║              L U P H A H L A   S C A N N E R  (BugScanX style)  ║${RESET}"
 echo -e "${BRIGHT_GREEN}${BOLD}  ╚══════════════════════════════════════════════════════════════════╝${RESET}"
 echo -e "  ${CYAN}Hosts:${RESET} $TOTAL  |  ${CYAN}Timeout:${RESET} ${TIMEOUT}s"
 echo ""
 
-# ---------- Zero-rated detection (based on hostname) ----------
+# ---------- Zero-rated detection ----------
 detect_free() {
   local host="$1"
   local lower=$(echo "$host" | tr '[:upper:]' '[:lower:]')
@@ -64,23 +64,24 @@ trap 'rm -f "$RESULTS"' EXIT
 while IFS= read -r host; do
   printf "\r  ${CYAN}Progress: ${WHITE}%d/$TOTAL${RESET}" "$LINE_NUM"
 
-  # 1. TLS handshake
-  if ! timeout "$TIMEOUT" openssl s_client -connect "$host:443" -servername "$host" -verify_quiet -brief </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
+  # ---- Liveness check using curl (BugScanX method) ----
+  # Get HTTP status code, IP, speed, and server header in one go
+  output=$(curl -s -k -I -w "%{http_code}|%{remote_ip}|%{speed_download}" -m "$TIMEOUT" "https://$host" 2>/dev/null)
+  code=$(echo "$output" | grep -oE '^[0-9]{3}')
+  ip=$(echo "$output" | cut -d'|' -f2)
+  speed_bytes=$(echo "$output" | cut -d'|' -f3)
+
+  # If code is empty, the host is dead
+  if [ -z "$code" ]; then
     LINE_NUM=$((LINE_NUM + 1))
     continue
   fi
 
-  # 2. Get IP, HTTP code, Server header, Speed
-  output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}" -m "$TIMEOUT" "https://$host" 2>/dev/null)
-  code=$(echo "$output" | cut -d'|' -f1)
-  ip=$(echo "$output" | cut -d'|' -f2)
-  speed_bytes=$(echo "$output" | cut -d'|' -f3)
-
-  # Server header
+  # ---- Get Server header (from the same curl -I output) ----
   server=$(curl -s -I -k -m "$TIMEOUT" "https://$host" 2>/dev/null | grep -i "^Server:" | head -1 | cut -d' ' -f2- | head -c 20)
   [ -z "$server" ] && server="Unknown"
 
-  # Speed label
+  # ---- Speed label ----
   if [[ "$speed_bytes" =~ ^[0-9]+ ]] && [ "$speed_bytes" -gt 0 ]; then
     speed_kb=$((speed_bytes / 1024))
     if [ "$speed_kb" -gt 100 ]; then speed_label="⚡ ${speed_kb} KB/s"; else speed_label="🐢 ${speed_kb} KB/s"; fi
@@ -88,15 +89,15 @@ while IFS= read -r host; do
     speed_label="⛔ No Data"
   fi
 
-  # Zero-rated detection
+  # ---- Zero-rated detection ----
   free_label=$(detect_free "$host")
 
   # Save result
-  echo "${LINE_NUM}|${host}|${ip:-N/A}|443|${code:-N/A}|${server}|${speed_label}|${free_label}" >> "$RESULTS"
+  echo "${LINE_NUM}|${host}|${ip:-N/A}|443|${code}|${server}|${speed_label}|${free_label}" >> "$RESULTS"
   LINE_NUM=$((LINE_NUM + 1))
 done < "$INPUT"
 
-echo "" # newline after progress bar
+echo "" # newline
 
 # ---------- Display table ----------
 LIVECOUNT=$(wc -l < "$RESULTS")
