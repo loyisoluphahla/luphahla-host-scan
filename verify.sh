@@ -201,7 +201,7 @@ echo -e "  ${G}✓${R} Total targets: ${C}$TOTAL${R}"
 echo ""
 
 # ============================
-# TESTING ENGINE (with line splitting)
+# TESTING ENGINE (with line splitting and proper count)
 # ============================
 INPUT="$FRESH_FILE"
 
@@ -230,84 +230,106 @@ update_spinner() {
   ((SPIN_IDX++)); [[ $SPIN_IDX -ge ${#SPINNER[@]} ]] && SPIN_IDX=0
 }
 
-COUNT=0; FOUND=0
+# Use a temporary file to count found hosts
+COUNT=0
+FOUND=0
 
-# CRITICAL FIX: Split each line on spaces before scanning
-tr ' ' '\n' < "$INPUT" | while IFS= read -r host; do
-  [[ -z "$host" ]] && continue
-  ((COUNT++)); update_spinner
+# Read the file, split on spaces, and process each host
+while IFS= read -r line; do
+  # Split the line on spaces into separate hosts
+  for host in $line; do
+    [[ -z "$host" ]] && continue
+    ((COUNT++))
+    update_spinner
 
-  if ! is_free "$host"; then continue; fi
+    if ! is_free "$host"; then
+      continue
+    fi
 
-  SUCCESS=false
-  SPEED_KB=0
-  METHOD_USED=""
-  IP_USED="N/A"
-  CONNECT_SUPPORT="❌"
-  WS_SUPPORT="❌"
-
-  if [[ "$TUNNEL_MODE" == true ]]; then
-    PORTS=(443 80 8080 8443)
-  else
-    PORTS=(443 80)
-  fi
-
-  for port in "${PORTS[@]}"; do
-    for method in "GET" "HEAD" "POST" "CONNECT"; do
-      output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 || $port -eq 8443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
-      code=$(echo "$output" | cut -d'|' -f1)
-      ip=$(echo "$output" | cut -d'|' -f2)
-      speed_bytes=$(echo "$output" | cut -d'|' -f3)
-      [[ -z "$ip" ]] && ip="N/A"
-
-      if [[ -n "$code" && "$code" != "000" ]]; then
-        SUCCESS=true
-        METHOD_USED="$method"
-        IP_USED="$ip"
-        [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
-        break 2
-      fi
-    done
-  done
-
-  if [[ "$SUCCESS" == false ]]; then
-    STATUS="BLOCKED"
-    SPEED_DISPLAY="N/A"
-    METHOD_USED="-"
+    SUCCESS=false
+    SPEED_KB=0
+    METHOD_USED=""
     IP_USED="N/A"
-  else
-    if (( SPEED_KB == 0 )); then SPEED_DISPLAY="0KB/s"
-    elif (( SPEED_KB > 100 )); then SPEED_DISPLAY="⚡${SPEED_KB}KB/s"
-    else SPEED_DISPLAY="🐢${SPEED_KB}KB/s"; fi
-
-    if (( SPEED_KB >= MIN_SPEED )); then STATUS="FREE"; else STATUS="THROTTLED"; fi
+    CONNECT_SUPPORT="❌"
+    WS_SUPPORT="❌"
 
     if [[ "$TUNNEL_MODE" == true ]]; then
-      connect_code=$(curl -s -o /dev/null -w "%{http_code}" -X CONNECT -k -m "$TIMEOUT" "https://$host" 2>/dev/null)
-      [[ "$connect_code" =~ ^(200|301|302|405)$ ]] && CONNECT_SUPPORT="✅" || CONNECT_SUPPORT="❌"
-      if curl -s -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" -k -m "$TIMEOUT" "https://$host" 2>/dev/null | grep -q "101 Switching"; then
-        WS_SUPPORT="✅"
+      PORTS=(443 80 8080 8443)
+    else
+      PORTS=(443 80)
+    fi
+
+    for port in "${PORTS[@]}"; do
+      for method in "GET" "HEAD" "POST" "CONNECT"; do
+        output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 || $port -eq 8443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
+        code=$(echo "$output" | cut -d'|' -f1)
+        ip=$(echo "$output" | cut -d'|' -f2)
+        speed_bytes=$(echo "$output" | cut -d'|' -f3)
+        [[ -z "$ip" ]] && ip="N/A"
+
+        if [[ -n "$code" && "$code" != "000" ]]; then
+          SUCCESS=true
+          METHOD_USED="$method"
+          IP_USED="$ip"
+          [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
+          break 2
+        fi
+      done
+    done
+
+    if [[ "$SUCCESS" == false ]]; then
+      STATUS="BLOCKED"
+      SPEED_DISPLAY="N/A"
+      METHOD_USED="-"
+      IP_USED="N/A"
+    else
+      if (( SPEED_KB == 0 )); then SPEED_DISPLAY="0KB/s"
+      elif (( SPEED_KB > 100 )); then SPEED_DISPLAY="⚡${SPEED_KB}KB/s"
+      else SPEED_DISPLAY="🐢${SPEED_KB}KB/s"
+      fi
+
+      if (( SPEED_KB >= MIN_SPEED )); then
+        STATUS="FREE"
       else
-        WS_SUPPORT="❌"
+        STATUS="THROTTLED"
+      fi
+
+      if [[ "$TUNNEL_MODE" == true ]]; then
+        connect_code=$(curl -s -o /dev/null -w "%{http_code}" -X CONNECT -k -m "$TIMEOUT" "https://$host" 2>/dev/null)
+        [[ "$connect_code" =~ ^(200|301|302|405)$ ]] && CONNECT_SUPPORT="✅" || CONNECT_SUPPORT="❌"
+        if curl -s -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" -k -m "$TIMEOUT" "https://$host" 2>/dev/null | grep -q "101 Switching"; then
+          WS_SUPPORT="✅"
+        else
+          WS_SUPPORT="❌"
+        fi
       fi
     fi
-  fi
 
-  if [[ "$SHOW_ALL" == false ]]; then
-    [[ "$STATUS" != "FREE" ]] && continue
-  fi
+    # Decide whether to show this host
+    if [[ "$SHOW_ALL" == false && "$STATUS" != "FREE" ]]; then
+      continue
+    fi
 
-  printf "\r  %-70s\r" ""
-  STATUS_COLOR="${G}${STATUS}${R}"
-  if [[ "$TUNNEL_MODE" == true ]]; then
-    [[ "$CONNECT_SUPPORT" == "✅" ]] && CONNECT_COLOR="${G}${CONNECT_SUPPORT}${R}" || CONNECT_COLOR="${RD}${CONNECT_SUPPORT}${R}"
-    [[ "$WS_SUPPORT" == "✅" ]] && WS_COLOR="${G}${WS_SUPPORT}${R}" || WS_COLOR="${RD}${WS_SUPPORT}${R}"
-    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}  ${CONNECT_COLOR}%-4s${R}  ${WS_COLOR}%-4s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS" "$CONNECT_SUPPORT" "$WS_SUPPORT"
-  else
-    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
-  fi
-  ((FOUND++))
-done
+    # Print the row
+    printf "\r  %-70s\r" ""
+    # Set color for STATUS (only once)
+    case "$STATUS" in
+      "FREE")      STATUS_COLOR="${G}${STATUS}${R}" ;;
+      "THROTTLED") STATUS_COLOR="${Y}${STATUS}${R}" ;;
+      "BLOCKED")   STATUS_COLOR="${RD}${STATUS}${R}" ;;
+      *)           STATUS_COLOR="${STATUS}" ;;
+    esac
+
+    if [[ "$TUNNEL_MODE" == true ]]; then
+      [[ "$CONNECT_SUPPORT" == "✅" ]] && CONNECT_COLOR="${G}${CONNECT_SUPPORT}${R}" || CONNECT_COLOR="${RD}${CONNECT_SUPPORT}${R}"
+      [[ "$WS_SUPPORT" == "✅" ]] && WS_COLOR="${G}${WS_SUPPORT}${R}" || WS_COLOR="${RD}${WS_SUPPORT}${R}"
+      printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}  ${CONNECT_COLOR}%-4s${R}  ${WS_COLOR}%-4s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS" "$CONNECT_SUPPORT" "$WS_SUPPORT"
+    else
+      printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
+    fi
+    ((FOUND++))
+  done
+done < "$INPUT"
 
 printf "\r  %-70s\r" ""
 echo ""
