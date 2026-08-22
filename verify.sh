@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Luphahla Scanner – Zero-Rated Host Checker (GET for speed)
-# Usage: cat hosts.txt | ./verify.sh [--timeout 4] [--min-speed 50]
+# Luphahla Scanner – Zero-Rated Host Checker (with Tunnel Test)
+# Usage: cat hosts.txt | ./verify.sh [--timeout 4] [--min-speed 50] [--tunnel]
 
 set -o pipefail
 
@@ -9,7 +9,8 @@ set -o pipefail
 # ============================
 TIMEOUT=4
 MIN_SPEED=50
-METHODS=("GET" "HEAD" "POST" "CONNECT")   # GET is now first for accurate speed
+TUNNEL_MODE=false
+METHODS=("GET" "HEAD" "POST" "CONNECT")
 PORTS=(443 80)
 
 # ============================
@@ -19,9 +20,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --timeout)   TIMEOUT="$2"; shift ;;
     --min-speed) MIN_SPEED="$2"; shift ;;
+    --tunnel)    TUNNEL_MODE=true ;;
     --help)
-      echo "Usage: cat hosts.txt | $0 [--timeout 4] [--min-speed 50]"
-      echo "  Uses GET method for accurate speed measurement."
+      echo "Usage: cat hosts.txt | $0 [--timeout 4] [--min-speed 50] [--tunnel]"
+      echo "  --tunnel : test CONNECT and WebSocket support (✅/❌)"
       exit 0
       ;;
     *) echo "Unknown option"; exit 2 ;;
@@ -62,14 +64,23 @@ clear
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
 echo -e "${BG}${G}         L U P H A H L A   Z E R O - R A T E D   H O S T S            ${R}"
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
-echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s, ports 443 & 80, GET first)"
+if [[ "$TUNNEL_MODE" == true ]]; then
+  echo -e "  ${C}Mode:${R} TUNNEL (speed ≥ ${MIN_SPEED} KB/s, CONNECT & WS tested)"
+else
+  echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s)"
+fi
 echo ""
 
 # ============================
 # TABLE HEADERS
 # ============================
-printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-10s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS"
-printf "  %-26s  %-10s  %-15s  %-10s  %-10s\n" "--------------------------" "----------" "---------------" "----------" "----------"
+if [[ "$TUNNEL_MODE" == true ]]; then
+  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-8s  %-4s  %-4s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS" "C" "WS"
+  printf "  %-26s  %-10s  %-15s  %-10s  %-8s  %-4s  %-4s\n" "--------------------------" "----------" "---------------" "----------" "--------" "---" "---"
+else
+  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-8s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS"
+  printf "  %-26s  %-10s  %-15s  %-10s  %-8s\n" "--------------------------" "----------" "---------------" "----------" "--------"
+fi
 
 # ============================
 # SPINNER
@@ -96,6 +107,7 @@ while IFS= read -r host; do
   IP_USED="N/A"
   BEST_PORT=0
 
+  # ---- Primary scan (GET first for speed) ----
   for port in "${PORTS[@]}"; do
     for method in "${METHODS[@]}"; do
       output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
@@ -115,11 +127,14 @@ while IFS= read -r host; do
     done
   done
 
+  # ---- CLASSIFY STATUS ----
   if [[ "$SUCCESS" == false ]]; then
     STATUS="BLOCKED"
     SPEED_DISPLAY="N/A"
     METHOD_USED="-"
     IP_USED="N/A"
+    CONNECT_SUPPORT="❌"
+    WS_SUPPORT="❌"
   else
     if (( SPEED_KB == 0 )); then
       SPEED_DISPLAY="0KB/s"
@@ -130,30 +145,60 @@ while IFS= read -r host; do
     fi
 
     if (( SPEED_KB >= MIN_SPEED )); then
-      STATUS="FREE (fast)"
+      STATUS="FREE"
     else
       STATUS="THROTTLED"
     fi
+
+    # ---- TUNNEL MODE: test CONNECT and WebSocket ----
+    if [[ "$TUNNEL_MODE" == true ]]; then
+      # Test CONNECT method
+      connect_code=$(curl -s -o /dev/null -w "%{http_code}" -X CONNECT -k -m "$TIMEOUT" "https://$host" 2>/dev/null)
+      if [[ "$connect_code" =~ ^(200|301|302|405)$ ]]; then
+        CONNECT_SUPPORT="✅"
+      else
+        CONNECT_SUPPORT="❌"
+      fi
+
+      # Test WebSocket upgrade
+      if curl -s -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" -k -m "$TIMEOUT" "https://$host" 2>/dev/null | grep -q "101 Switching"; then
+        WS_SUPPORT="✅"
+      else
+        WS_SUPPORT="❌"
+      fi
+    else
+      CONNECT_SUPPORT=""
+      WS_SUPPORT=""
+    fi
   fi
 
-  # Only show fast hosts
-  if [[ "$STATUS" != "FREE (fast)" ]]; then
+  # ---- FILTER: only show fast hosts ----
+  if [[ "$STATUS" != "FREE" ]]; then
     continue
   fi
 
+  # ---- PRINT ROW ----
   printf "\r  %-70s\r" ""
-  case "$STATUS" in
-    "FREE (fast)") STATUS_COLOR="${G}${STATUS}${R}" ;;
-    "THROTTLED")   STATUS_COLOR="${Y}${STATUS}${R}" ;;
-    "BLOCKED")     STATUS_COLOR="${RD}${STATUS}${R}" ;;
-    *)             STATUS_COLOR="${STATUS}" ;;
-  esac
-  printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-10s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
+  STATUS_COLOR="${G}${STATUS}${R}"
+
+  if [[ "$TUNNEL_MODE" == true ]]; then
+    # Color the emojis: green for ✅, red for ❌
+    [[ "$CONNECT_SUPPORT" == "✅" ]] && CONNECT_COLOR="${G}${CONNECT_SUPPORT}${R}" || CONNECT_COLOR="${RD}${CONNECT_SUPPORT}${R}"
+    [[ "$WS_SUPPORT" == "✅" ]] && WS_COLOR="${G}${WS_SUPPORT}${R}" || WS_COLOR="${RD}${WS_SUPPORT}${R}"
+    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}  ${CONNECT_COLOR}%-4s${R}  ${WS_COLOR}%-4s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS" "$CONNECT_SUPPORT" "$WS_SUPPORT"
+  else
+    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
+  fi
   ((FOUND++))
 done < "$INPUT"
 
 printf "\r  %-70s\r" ""
 echo ""
-echo -e "${G}✓${R} Found: ${C}$FOUND${R} zero-rated hosts (speed ≥ ${MIN_SPEED} KB/s)."
-echo -e "  ${C}Note:${R} GET method is now used first for accurate speeds."
+if [[ "$TUNNEL_MODE" == true ]]; then
+  echo -e "${G}✓${R} Found: ${C}$FOUND${R} tunnel‑ready candidates (speed ≥ ${MIN_SPEED} KB/s)."
+  echo -e "  ${C}Columns:${R} C = CONNECT support, WS = WebSocket support"
+else
+  echo -e "${G}✓${R} Found: ${C}$FOUND${R} zero-rated hosts (speed ≥ ${MIN_SPEED} KB/s)."
+  echo -e "  ${C}Tip:${R} Use --tunnel to test CONNECT and WebSocket support."
+fi
 exit 0
