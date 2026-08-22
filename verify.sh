@@ -45,6 +45,20 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
+# VALIDATE HOST (no HTML, no spaces, only domain/IP format)
+# ============================
+is_valid_host() {
+  local h="$1"
+  # Reject if empty, contains spaces, HTML tags, or special chars
+  [[ -z "$h" ]] && return 1
+  [[ "$h" =~ [[:space:]] ]] && return 1
+  [[ "$h" =~ [<>] ]] && return 1
+  [[ "$h" =~ [\{\}\(\)] ]] && return 1
+  # Allow domain or IP format (simple check)
+  [[ "$h" =~ ^[a-zA-Z0-9.-]+$ ]] || [[ "$h" =~ ^[0-9.]+$ ]]
+}
+
+# ============================
 # CHECK IF INPUT IS PIPED
 # ============================
 if [ ! -t 0 ]; then
@@ -92,7 +106,11 @@ echo ""
 if [[ "$SKIP_DISCOVERY" == false ]]; then
   if [[ "$TUNNEL_MODE" == true || "$UNLIMITED" == true ]]; then
     echo -e "  ${C}●${R} Fetching top 10,000 domains..."
-    curl -s -m 30 "https://api.hackertarget.com/topdomains/" | head -10000 >> "$FRESH_FILE"
+    curl -s -m 30 "https://api.hackertarget.com/topdomains/" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' | head -10000 | while read -r line; do
+      for word in $line; do
+        is_valid_host "$word" && echo "$word"
+      done
+    done >> "$FRESH_FILE"
 
     echo -e "  ${C}●${R} Adding KOFnet & Zimbabwe hosts..."
     cat >> "$FRESH_FILE" << 'EOF'
@@ -113,7 +131,11 @@ EOF
     TLDS="com org net io app dev tv cloud zone xyz online tech co.zw co.za uk de fr jp in br au ca ru cn kr za"
     for tld in $TLDS; do
       curl -s -m 10 "https://crt.sh/?q=%25.${tld}&output=json" 2>/dev/null | \
-        grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -300 > "$TDIR/ct_${tld}.txt"
+        grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -300 | while read -r line; do
+        for word in $line; do
+          is_valid_host "$word" && echo "$word"
+        done
+      done > "$TDIR/ct_${tld}.txt"
     done
     cat "$TDIR"/ct_*.txt 2>/dev/null >> "$FRESH_FILE"
 
@@ -121,7 +143,9 @@ EOF
     PREFIXES="www mail api admin dev test vpn proxy cdn secure auth m mobile ws app portal dashboard static media img video stream live edge stage beta prod"
     head -2000 "$FRESH_FILE" | while read -r domain; do
       [[ -z "$domain" || "$domain" =~ ^# ]] && continue
-      for p in $PREFIXES; do echo "${p}.${domain}"; done
+      for p in $PREFIXES; do
+        is_valid_host "${p}.${domain}" && echo "${p}.${domain}"
+      done
     done >> "$FRESH_FILE"
 
     echo -e "  ${C}●${R} IP ranges (full /16 scans)..."
@@ -135,11 +159,15 @@ EOF
         base="${cidr%/*}"
         if [[ "$mask" -eq 24 ]]; then
           prefix="${base%.*}"
-          for i in {1..254}; do echo "${prefix}.${i}"; done
+          for i in {1..254}; do
+            is_valid_host "${prefix}.${i}" && echo "${prefix}.${i}"
+          done
         elif [[ "$mask" -eq 16 ]]; then
           prefix="${base%.*.*}"
           for i in {0..255}; do
-            for j in {1..254}; do echo "${prefix}.${i}.${j}"; done
+            for j in {1..254}; do
+              is_valid_host "${prefix}.${i}.${j}" && echo "${prefix}.${i}.${j}"
+            done
           done
         fi
       done
@@ -177,7 +205,11 @@ EOF
     TLDS="com org net co.zw co.za uk de fr jp in br au ca"
     for tld in $TLDS; do
       curl -s -m 10 "https://crt.sh/?q=%25.${tld}&output=json" 2>/dev/null | \
-        grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -150 > "$TDIR/ct_${tld}.txt"
+        grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -150 | while read -r line; do
+        for word in $line; do
+          is_valid_host "$word" && echo "$word"
+        done
+      done > "$TDIR/ct_${tld}.txt"
     done
     cat "$TDIR"/ct_*.txt 2>/dev/null >> "$FRESH_FILE"
 
@@ -185,7 +217,9 @@ EOF
     PREFIXES="www mail api admin dev test vpn proxy cdn secure auth m mobile ws app"
     head -500 "$FRESH_FILE" | while read -r domain; do
       [[ -z "$domain" || "$domain" =~ ^# ]] && continue
-      for p in $PREFIXES; do echo "${p}.${domain}"; done
+      for p in $PREFIXES; do
+        is_valid_host "${p}.${domain}" && echo "${p}.${domain}"
+      done
     done >> "$FRESH_FILE"
 
     echo -e "  ${C}●${R} IP ranges (sampled /24)..."
@@ -216,7 +250,7 @@ one.one.one.one dns.google cloudflare-dns.com quad9.net opendns.com
 EOF
   fi
 
-  # ---- Deduplicate discovered list ----
+  # ---- Clean and deduplicate ----
   sort -u "$FRESH_FILE" -o "$FRESH_FILE"
   grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" > "$FRESH_FILE.tmp"
   mv "$FRESH_FILE.tmp" "$FRESH_FILE"
@@ -226,7 +260,7 @@ EOF
 fi
 
 # ============================
-# TESTING ENGINE – NO PATTERN FILTER IF UNLIMITED
+# TESTING ENGINE
 # ============================
 INPUT="$FRESH_FILE"
 
@@ -241,7 +275,6 @@ if [[ "$UNLIMITED" == false ]]; then
     return 1
   }
 else
-  # Unlimited: allow everything
   is_free() { return 0; }
 fi
 
@@ -332,12 +365,10 @@ while IFS= read -r line; do
       fi
     fi
 
-    # Decide whether to show this host
     if [[ "$SHOW_ALL" == false && "$STATUS" != "FREE" ]]; then
       continue
     fi
 
-    # ---- Print row (FIXED: status only once, emojis once) ----
     printf "\r  %-70s\r" ""
 
     # Colour for STATUS (only once)
@@ -351,7 +382,6 @@ while IFS= read -r line; do
     if [[ "$TUNNEL_MODE" == true ]]; then
       [[ "$CONNECT_SUPPORT" == "✅" ]] && CONNECT_COLOR="${G}${CONNECT_SUPPORT}${R}" || CONNECT_COLOR="${RD}${CONNECT_SUPPORT}${R}"
       [[ "$WS_SUPPORT" == "✅" ]] && WS_COLOR="${G}${WS_SUPPORT}${R}" || WS_COLOR="${RD}${WS_SUPPORT}${R}"
-      # Print: each field only once
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}  ${CONNECT_COLOR}%-4s${R}  ${WS_COLOR}%-4s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS" "$CONNECT_SUPPORT" "$WS_SUPPORT"
     else
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
