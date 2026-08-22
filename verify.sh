@@ -49,11 +49,13 @@ R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37
 # ============================
 is_valid_host() {
   local h="$1"
-  # Reject if empty, contains spaces, HTML tags, or special chars
+  # Reject if empty or contains spaces
   [[ -z "$h" ]] && return 1
-  [[ "$h" =~ [[:space:]] ]] && return 1
-  [[ "$h" =~ [<>] ]] && return 1
-  [[ "$h" =~ [\{\}\(\)] ]] && return 1
+  [[ "$h" = *[[:space:]]* ]] && return 1
+  # Reject if contains HTML/XML special chars
+  case "$h" in
+    *\<*|*\>*|*\{*|*\}*|*\(*|*\)*) return 1 ;;
+  esac
   # Allow domain or IP format (simple check)
   [[ "$h" =~ ^[a-zA-Z0-9.-]+$ ]] || [[ "$h" =~ ^[0-9.]+$ ]]
 }
@@ -264,7 +266,6 @@ fi
 # ============================
 INPUT="$FRESH_FILE"
 
-# If NOT unlimited, use the pattern list
 if [[ "$UNLIMITED" == false ]]; then
   is_free() {
     local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
@@ -371,7 +372,6 @@ while IFS= read -r line; do
 
     printf "\r  %-70s\r" ""
 
-    # Colour for STATUS (only once)
     case "$STATUS" in
       "FREE")      STATUS_COLOR="${G}${STATUS}${R}" ;;
       "THROTTLED") STATUS_COLOR="${Y}${STATUS}${R}" ;;
