@@ -42,7 +42,6 @@ R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37
 # ============================
 # SETUP TEMP DIRECTORY (Termux-safe)
 # ============================
-# Use $TMPDIR if set and writable, otherwise fallback to ~/.cache
 if [[ -n "$TMPDIR" && -w "$TMPDIR" ]]; then
   TDIR="${TMPDIR}/luphahla_discovery"
 else
@@ -52,7 +51,7 @@ fi
 mkdir -p "$TDIR" || { echo -e "${RD}Failed to create temp directory at $TDIR${R}"; exit 1; }
 trap 'rm -rf "$TDIR"' EXIT INT TERM
 FRESH_FILE="$TDIR/fresh_hosts.txt"
-: > "$FRESH_FILE"  # ensure it exists
+: > "$FRESH_FILE"
 
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
 echo -e "${BG}${G}        L U P H A H L A   U N I V E R S A L   S C A N N E R         ${R}"
@@ -65,7 +64,7 @@ fi
 echo ""
 
 # ============================
-# DISCOVERY ENGINE
+# DISCOVERY ENGINE (unchanged)
 # ============================
 if [[ "$TUNNEL_MODE" == true ]]; then
   echo -e "  ${C}●${R} Fetching top 10,000 domains..."
@@ -129,7 +128,7 @@ one.one.one.one dns.google cloudflare-dns.com quad9.net opendns.com
 EOF
 
 else
-  # STANDARD MODE
+  # STANDARD MODE – same as before, but we'll keep it for completeness
   echo -e "  ${C}●${R} Adding curated domains..."
   cat >> "$FRESH_FILE" << 'EOF'
 google.com youtube.com facebook.com twitter.com x.com tesla.com spacex.com starlink.com
@@ -202,7 +201,7 @@ echo -e "  ${G}✓${R} Total targets: ${C}$TOTAL${R}"
 echo ""
 
 # ============================
-# TESTING ENGINE (same as before)
+# TESTING ENGINE (with line splitting)
 # ============================
 INPUT="$FRESH_FILE"
 
@@ -232,8 +231,12 @@ update_spinner() {
 }
 
 COUNT=0; FOUND=0
-while IFS= read -r host; do
+
+# CRITICAL FIX: Split each line on spaces before scanning
+tr ' ' '\n' < "$INPUT" | while IFS= read -r host; do
+  [[ -z "$host" ]] && continue
   ((COUNT++)); update_spinner
+
   if ! is_free "$host"; then continue; fi
 
   SUCCESS=false
@@ -243,7 +246,6 @@ while IFS= read -r host; do
   CONNECT_SUPPORT="❌"
   WS_SUPPORT="❌"
 
-  # Ports: 443,80,8080,8443 if tunnel, else just 443,80
   if [[ "$TUNNEL_MODE" == true ]]; then
     PORTS=(443 80 8080 8443)
   else
@@ -274,14 +276,12 @@ while IFS= read -r host; do
     METHOD_USED="-"
     IP_USED="N/A"
   else
-    # Speed display
     if (( SPEED_KB == 0 )); then SPEED_DISPLAY="0KB/s"
     elif (( SPEED_KB > 100 )); then SPEED_DISPLAY="⚡${SPEED_KB}KB/s"
     else SPEED_DISPLAY="🐢${SPEED_KB}KB/s"; fi
 
     if (( SPEED_KB >= MIN_SPEED )); then STATUS="FREE"; else STATUS="THROTTLED"; fi
 
-    # Tunnel tests (only if --tunnel)
     if [[ "$TUNNEL_MODE" == true ]]; then
       connect_code=$(curl -s -o /dev/null -w "%{http_code}" -X CONNECT -k -m "$TIMEOUT" "https://$host" 2>/dev/null)
       [[ "$connect_code" =~ ^(200|301|302|405)$ ]] && CONNECT_SUPPORT="✅" || CONNECT_SUPPORT="❌"
@@ -307,7 +307,7 @@ while IFS= read -r host; do
     printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
   fi
   ((FOUND++))
-done < "$INPUT"
+done
 
 printf "\r  %-70s\r" ""
 echo ""
