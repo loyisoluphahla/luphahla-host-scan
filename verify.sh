@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Luphahla Universal Scanner – One flag: --tunnel does everything
-# Usage: ./verify.sh [--timeout 4] [--min-speed 50] [--tunnel] [--all]
+# Luphahla Universal Scanner – Unlimited mode tests ALL hosts
+# Usage: ./verify.sh [--timeout 4] [--min-speed 50] [--tunnel] [--all] [--unlimited]
 
 set -o pipefail
 
@@ -11,6 +11,7 @@ TIMEOUT=4
 MIN_SPEED=50
 TUNNEL_MODE=false
 SHOW_ALL=false
+UNLIMITED=false
 
 # ============================
 # PARSE ARGUMENTS
@@ -19,14 +20,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --tunnel)    TUNNEL_MODE=true ;;
     --all)       SHOW_ALL=true ;;
+    --unlimited) UNLIMITED=true ;;
     --timeout)   TIMEOUT="$2"; shift ;;
     --min-speed) MIN_SPEED="$2"; shift ;;
     --help)
       echo "Luphahla Universal Scanner"
-      echo "  --tunnel      : FULL MODE (massive discovery + CONNECT/WS tests)"
+      echo "  --tunnel      : test CONNECT and WebSocket support"
       echo "  --all         : show throttled/blocked hosts too"
+      echo "  --unlimited   : test ALL hosts (no pattern filtering)"
       echo "  --timeout N   : timeout per request (default 4)"
       echo "  --min-speed N : minimum speed in KB/s (default 50)"
+      echo ""
+      echo "If you pipe a host list, discovery is skipped and only those hosts are tested."
       exit 0
       ;;
     *) echo "Unknown option"; exit 2 ;;
@@ -40,38 +45,57 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
-# SETUP TEMP DIRECTORY (Termux-safe)
+# CHECK IF INPUT IS PIPED
 # ============================
-if [[ -n "$TMPDIR" && -w "$TMPDIR" ]]; then
-  TDIR="${TMPDIR}/luphahla_discovery"
+if [ ! -t 0 ]; then
+  INPUT=$(mktemp)
+  trap 'rm -f "$INPUT"' EXIT INT TERM
+  cat > "$INPUT"
+  TOTAL=$(wc -l < "$INPUT")
+  SKIP_DISCOVERY=true
 else
-  TDIR="${HOME}/.cache/luphahla_discovery"
+  SKIP_DISCOVERY=false
 fi
 
-mkdir -p "$TDIR" || { echo -e "${RD}Failed to create temp directory at $TDIR${R}"; exit 1; }
-trap 'rm -rf "$TDIR"' EXIT INT TERM
-FRESH_FILE="$TDIR/fresh_hosts.txt"
-: > "$FRESH_FILE"
+# ============================
+# SETUP TEMP DIRECTORY
+# ============================
+TDIR="${HOME}/.cache/luphahla_discovery"
+mkdir -p "$TDIR"
+
+if [[ "$SKIP_DISCOVERY" == false ]]; then
+  FRESH_FILE="$TDIR/fresh_hosts.txt"
+  : > "$FRESH_FILE"
+else
+  FRESH_FILE="$INPUT"
+fi
 
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
 echo -e "${BG}${G}        L U P H A H L A   U N I V E R S A L   S C A N N E R         ${R}"
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
-if [[ "$TUNNEL_MODE" == true ]]; then
-  echo -e "  ${C}Mode:${R} TUNNEL (full discovery + CONNECT/WS tests)"
+if [[ "$SKIP_DISCOVERY" == true ]]; then
+  echo -e "  ${C}Mode:${R} PIPED INPUT (testing only provided hosts)"
 else
-  echo -e "  ${C}Mode:${R} STANDARD (curated discovery, speed only)"
+  if [[ "$UNLIMITED" == true ]]; then
+    echo -e "  ${C}Mode:${R} UNLIMITED (testing ALL discovered hosts)"
+  elif [[ "$TUNNEL_MODE" == true ]]; then
+    echo -e "  ${C}Mode:${R} TUNNEL (full discovery + CONNECT/WS tests)"
+  else
+    echo -e "  ${C}Mode:${R} STANDARD (curated discovery, speed only)"
+  fi
 fi
 echo ""
 
 # ============================
-# DISCOVERY ENGINE (unchanged)
+# DISCOVERY ENGINE (only if not piped)
 # ============================
-if [[ "$TUNNEL_MODE" == true ]]; then
-  echo -e "  ${C}●${R} Fetching top 10,000 domains..."
-  curl -s -m 30 "https://api.hackertarget.com/topdomains/" | head -10000 >> "$FRESH_FILE"
+if [[ "$SKIP_DISCOVERY" == false ]]; then
+  if [[ "$TUNNEL_MODE" == true || "$UNLIMITED" == true ]]; then
+    echo -e "  ${C}●${R} Fetching top 10,000 domains..."
+    curl -s -m 30 "https://api.hackertarget.com/topdomains/" | head -10000 >> "$FRESH_FILE"
 
-  echo -e "  ${C}●${R} Adding KOFnet & Zimbabwe hosts..."
-  cat >> "$FRESH_FILE" << 'EOF'
+    echo -e "  ${C}●${R} Adding KOFnet & Zimbabwe hosts..."
+    cat >> "$FRESH_FILE" << 'EOF'
 econet.co.zw netone.co.zw telcel.co.zw telone.co.zw liquid.co.zw
 ecocash.co.zw ibills.econet.co.zw meet.econet.co.zw selfcare.econet.co.zw
 apps.netone.co.zw vasapi.netone.co.zw apn.netone.co.zw orgonemoney.netone.co.zw
@@ -85,52 +109,52 @@ health.go.ug www.msmehub.org www.corporate.latamairlines.com
 mtn.co.za vodacom.co.za safaricom.co.ke airtel.africa orange.sn
 EOF
 
-  echo -e "  ${C}●${R} CT logs (30 TLDs, 300 each)..."
-  TLDS="com org net io app dev tv cloud zone xyz online tech co.zw co.za uk de fr jp in br au ca ru cn kr za"
-  for tld in $TLDS; do
-    curl -s -m 10 "https://crt.sh/?q=%25.${tld}&output=json" 2>/dev/null | \
-      grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -300 > "$TDIR/ct_${tld}.txt"
-  done
-  cat "$TDIR"/ct_*.txt 2>/dev/null >> "$FRESH_FILE"
-
-  echo -e "  ${C}●${R} Brute‑forcing subdomains (30 prefixes)..."
-  PREFIXES="www mail api admin dev test vpn proxy cdn secure auth m mobile ws app portal dashboard static media img video stream live edge stage beta prod"
-  head -2000 "$FRESH_FILE" | while read -r domain; do
-    [[ -z "$domain" || "$domain" =~ ^# ]] && continue
-    for p in $PREFIXES; do echo "${p}.${domain}"; done
-  done >> "$FRESH_FILE"
-
-  echo -e "  ${C}●${R} IP ranges (full /16 scans)..."
-  ASNS=("AS37356" "AS36985" "AS37365" "AS16637" "AS37148" "AS33785" "AS37278" "AS33779")
-  CURRENT_ASN=$(curl -s -m 5 "https://ipinfo.io/org" | grep -oE 'AS[0-9]+' | head -1)
-  [[ -n "$CURRENT_ASN" ]] && ASNS+=("$CURRENT_ASN")
-  for asn in "${ASNS[@]}"; do
-    ranges=$(curl -s -m 10 "https://ipinfo.io/${asn}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -5)
-    for cidr in $ranges; do
-      mask="${cidr#*/}"
-      base="${cidr%/*}"
-      if [[ "$mask" -eq 24 ]]; then
-        prefix="${base%.*}"
-        for i in {1..254}; do echo "${prefix}.${i}"; done
-      elif [[ "$mask" -eq 16 ]]; then
-        prefix="${base%.*.*}"
-        for i in {0..255}; do
-          for j in {1..254}; do echo "${prefix}.${i}.${j}"; done
-        done
-      fi
+    echo -e "  ${C}●${R} CT logs (30 TLDs, 300 each)..."
+    TLDS="com org net io app dev tv cloud zone xyz online tech co.zw co.za uk de fr jp in br au ca ru cn kr za"
+    for tld in $TLDS; do
+      curl -s -m 10 "https://crt.sh/?q=%25.${tld}&output=json" 2>/dev/null | \
+        grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -300 > "$TDIR/ct_${tld}.txt"
     done
-  done >> "$FRESH_FILE"
+    cat "$TDIR"/ct_*.txt 2>/dev/null >> "$FRESH_FILE"
 
-  echo -e "  ${C}●${R} Public resolvers..."
-  cat >> "$FRESH_FILE" << 'EOF'
+    echo -e "  ${C}●${R} Brute‑forcing subdomains (30 prefixes)..."
+    PREFIXES="www mail api admin dev test vpn proxy cdn secure auth m mobile ws app portal dashboard static media img video stream live edge stage beta prod"
+    head -2000 "$FRESH_FILE" | while read -r domain; do
+      [[ -z "$domain" || "$domain" =~ ^# ]] && continue
+      for p in $PREFIXES; do echo "${p}.${domain}"; done
+    done >> "$FRESH_FILE"
+
+    echo -e "  ${C}●${R} IP ranges (full /16 scans)..."
+    ASNS=("AS37356" "AS36985" "AS37365" "AS16637" "AS37148" "AS33785" "AS37278" "AS33779")
+    CURRENT_ASN=$(curl -s -m 5 "https://ipinfo.io/org" | grep -oE 'AS[0-9]+' | head -1)
+    [[ -n "$CURRENT_ASN" ]] && ASNS+=("$CURRENT_ASN")
+    for asn in "${ASNS[@]}"; do
+      ranges=$(curl -s -m 10 "https://ipinfo.io/${asn}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -5)
+      for cidr in $ranges; do
+        mask="${cidr#*/}"
+        base="${cidr%/*}"
+        if [[ "$mask" -eq 24 ]]; then
+          prefix="${base%.*}"
+          for i in {1..254}; do echo "${prefix}.${i}"; done
+        elif [[ "$mask" -eq 16 ]]; then
+          prefix="${base%.*.*}"
+          for i in {0..255}; do
+            for j in {1..254}; do echo "${prefix}.${i}.${j}"; done
+          done
+        fi
+      done
+    done >> "$FRESH_FILE"
+
+    echo -e "  ${C}●${R} Public resolvers..."
+    cat >> "$FRESH_FILE" << 'EOF'
 1.1.1.1 8.8.8.8 9.9.9.9 208.67.222.222 208.67.220.220
 one.one.one.one dns.google cloudflare-dns.com quad9.net opendns.com
 EOF
 
-else
-  # STANDARD MODE – same as before, but we'll keep it for completeness
-  echo -e "  ${C}●${R} Adding curated domains..."
-  cat >> "$FRESH_FILE" << 'EOF'
+  else
+    # STANDARD MODE (curated)
+    echo -e "  ${C}●${R} Adding curated domains..."
+    cat >> "$FRESH_FILE" << 'EOF'
 google.com youtube.com facebook.com twitter.com x.com tesla.com spacex.com starlink.com
 instagram.com whatsapp.com amazon.com microsoft.com apple.com netflix.com reddit.com
 linkedin.com github.com live.com yahoo.com office.com zoom.us tiktok.com bing.com
@@ -149,70 +173,77 @@ health.go.ug www.msmehub.org www.corporate.latamairlines.com
 mtn.co.za vodacom.co.za safaricom.co.ke airtel.africa orange.sn
 EOF
 
-  echo -e "  ${C}●${R} CT logs (13 TLDs, 150 each)..."
-  TLDS="com org net co.zw co.za uk de fr jp in br au ca"
-  for tld in $TLDS; do
-    curl -s -m 10 "https://crt.sh/?q=%25.${tld}&output=json" 2>/dev/null | \
-      grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -150 > "$TDIR/ct_${tld}.txt"
-  done
-  cat "$TDIR"/ct_*.txt 2>/dev/null >> "$FRESH_FILE"
-
-  echo -e "  ${C}●${R} Brute‑forcing subdomains..."
-  PREFIXES="www mail api admin dev test vpn proxy cdn secure auth m mobile ws app"
-  head -500 "$FRESH_FILE" | while read -r domain; do
-    [[ -z "$domain" || "$domain" =~ ^# ]] && continue
-    for p in $PREFIXES; do echo "${p}.${domain}"; done
-  done >> "$FRESH_FILE"
-
-  echo -e "  ${C}●${R} IP ranges (sampled /24)..."
-  ASNS=("AS37356" "AS36985" "AS37365" "AS16637" "AS37148")
-  CURRENT_ASN=$(curl -s -m 5 "https://ipinfo.io/org" | grep -oE 'AS[0-9]+' | head -1)
-  [[ -n "$CURRENT_ASN" ]] && ASNS+=("$CURRENT_ASN")
-  for asn in "${ASNS[@]}"; do
-    ranges=$(curl -s -m 10 "https://ipinfo.io/${asn}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -5)
-    for cidr in $ranges; do
-      mask="${cidr#*/}"
-      base="${cidr%/*}"
-      if [[ "$mask" -eq 24 ]]; then
-        prefix="${base%.*}"
-        for i in {1..254}; do echo "${prefix}.${i}"; done
-      elif [[ "$mask" -eq 16 ]]; then
-        prefix="${base%.*.*}"
-        for i in {0..5}; do
-          for j in {1..254}; do echo "${prefix}.${i}.${j}"; done
-        done
-      fi
+    echo -e "  ${C}●${R} CT logs (13 TLDs, 150 each)..."
+    TLDS="com org net co.zw co.za uk de fr jp in br au ca"
+    for tld in $TLDS; do
+      curl -s -m 10 "https://crt.sh/?q=%25.${tld}&output=json" 2>/dev/null | \
+        grep -oP '"name_value":"\K[^"]+' | sed 's/\\\\.//g' | head -150 > "$TDIR/ct_${tld}.txt"
     done
-  done >> "$FRESH_FILE"
+    cat "$TDIR"/ct_*.txt 2>/dev/null >> "$FRESH_FILE"
 
-  echo -e "  ${C}●${R} Public resolvers..."
-  cat >> "$FRESH_FILE" << 'EOF'
+    echo -e "  ${C}●${R} Brute‑forcing subdomains..."
+    PREFIXES="www mail api admin dev test vpn proxy cdn secure auth m mobile ws app"
+    head -500 "$FRESH_FILE" | while read -r domain; do
+      [[ -z "$domain" || "$domain" =~ ^# ]] && continue
+      for p in $PREFIXES; do echo "${p}.${domain}"; done
+    done >> "$FRESH_FILE"
+
+    echo -e "  ${C}●${R} IP ranges (sampled /24)..."
+    ASNS=("AS37356" "AS36985" "AS37365" "AS16637" "AS37148")
+    CURRENT_ASN=$(curl -s -m 5 "https://ipinfo.io/org" | grep -oE 'AS[0-9]+' | head -1)
+    [[ -n "$CURRENT_ASN" ]] && ASNS+=("$CURRENT_ASN")
+    for asn in "${ASNS[@]}"; do
+      ranges=$(curl -s -m 10 "https://ipinfo.io/${asn}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -5)
+      for cidr in $ranges; do
+        mask="${cidr#*/}"
+        base="${cidr%/*}"
+        if [[ "$mask" -eq 24 ]]; then
+          prefix="${base%.*}"
+          for i in {1..254}; do echo "${prefix}.${i}"; done
+        elif [[ "$mask" -eq 16 ]]; then
+          prefix="${base%.*.*}"
+          for i in {0..5}; do
+            for j in {1..254}; do echo "${prefix}.${i}.${j}"; done
+          done
+        fi
+      done
+    done >> "$FRESH_FILE"
+
+    echo -e "  ${C}●${R} Public resolvers..."
+    cat >> "$FRESH_FILE" << 'EOF'
 1.1.1.1 8.8.8.8 9.9.9.9 208.67.222.222 208.67.220.220
 one.one.one.one dns.google cloudflare-dns.com quad9.net opendns.com
 EOF
+  fi
+
+  # ---- Deduplicate discovered list ----
+  sort -u "$FRESH_FILE" -o "$FRESH_FILE"
+  grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" > "$FRESH_FILE.tmp"
+  mv "$FRESH_FILE.tmp" "$FRESH_FILE"
+  TOTAL=$(wc -l < "$FRESH_FILE")
+  echo -e "  ${G}✓${R} Total targets: ${C}$TOTAL${R}"
+  echo ""
 fi
 
-# ---- Deduplicate ----
-sort -u "$FRESH_FILE" -o "$FRESH_FILE"
-grep -vE '^[[:space:]]*(#|$)' "$FRESH_FILE" > "$FRESH_FILE.tmp"
-mv "$FRESH_FILE.tmp" "$FRESH_FILE"
-TOTAL=$(wc -l < "$FRESH_FILE")
-echo -e "  ${G}✓${R} Total targets: ${C}$TOTAL${R}"
-echo ""
-
 # ============================
-# TESTING ENGINE (with line splitting and proper count)
+# TESTING ENGINE – NO PATTERN FILTER IF UNLIMITED
 # ============================
 INPUT="$FRESH_FILE"
 
-is_free() {
-  local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-  for p in google youtube facebook meta whatsapp instagram twitter x.com tesla spacex starlink netflix spotify cloudflare amazon microsoft apple icloud live outlook office bing yahoo econet netone mtn vodacom orange airtel safaricom github stackoverflow \
-           econetwireless zigssh roshan etisalat mtnplay goodinternet learningpassport unicef msmehub latamairlines ooguy bundles orgonemoney topup apn vasapi selfcare ibills meet elevateyouth oldlock; do
-    [[ "$h" == *"$p"* ]] && return 0
-  done
-  return 1
-}
+# If NOT unlimited, use the pattern list
+if [[ "$UNLIMITED" == false ]]; then
+  is_free() {
+    local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    for p in google youtube facebook meta whatsapp instagram twitter x.com tesla spacex starlink netflix spotify cloudflare amazon microsoft apple icloud live outlook office bing yahoo econet netone mtn vodacom orange airtel safaricom github stackoverflow \
+             econetwireless zigssh roshan etisalat mtnplay goodinternet learningpassport unicef msmehub latamairlines ooguy bundles orgonemoney topup apn vasapi selfcare ibills meet elevateyouth oldlock; do
+      [[ "$h" == *"$p"* ]] && return 0
+    done
+    return 1
+  }
+else
+  # Unlimited: allow everything
+  is_free() { return 0; }
+fi
 
 # Table headers
 if [[ "$TUNNEL_MODE" == true ]]; then
@@ -230,13 +261,9 @@ update_spinner() {
   ((SPIN_IDX++)); [[ $SPIN_IDX -ge ${#SPINNER[@]} ]] && SPIN_IDX=0
 }
 
-# Use a temporary file to count found hosts
-COUNT=0
-FOUND=0
+COUNT=0; FOUND=0
 
-# Read the file, split on spaces, and process each host
 while IFS= read -r line; do
-  # Split the line on spaces into separate hosts
   for host in $line; do
     [[ -z "$host" ]] && continue
     ((COUNT++))
@@ -310,9 +337,10 @@ while IFS= read -r line; do
       continue
     fi
 
-    # Print the row
+    # ---- Print row (FIXED: status only once, emojis once) ----
     printf "\r  %-70s\r" ""
-    # Set color for STATUS (only once)
+
+    # Colour for STATUS (only once)
     case "$STATUS" in
       "FREE")      STATUS_COLOR="${G}${STATUS}${R}" ;;
       "THROTTLED") STATUS_COLOR="${Y}${STATUS}${R}" ;;
@@ -323,6 +351,7 @@ while IFS= read -r line; do
     if [[ "$TUNNEL_MODE" == true ]]; then
       [[ "$CONNECT_SUPPORT" == "✅" ]] && CONNECT_COLOR="${G}${CONNECT_SUPPORT}${R}" || CONNECT_COLOR="${RD}${CONNECT_SUPPORT}${R}"
       [[ "$WS_SUPPORT" == "✅" ]] && WS_COLOR="${G}${WS_SUPPORT}${R}" || WS_COLOR="${RD}${WS_SUPPORT}${R}"
+      # Print: each field only once
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}  ${CONNECT_COLOR}%-4s${R}  ${WS_COLOR}%-4s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS" "$CONNECT_SUPPORT" "$WS_SUPPORT"
     else
       printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
