@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Luphahla Scanner – Zero-Rated Host Checker (Community Edition)
+# Luphahla Scanner – Zero-Rated Host Checker (GET for speed)
 # Usage: cat hosts.txt | ./verify.sh [--timeout 4] [--min-speed 50]
 
 set -o pipefail
@@ -9,8 +9,8 @@ set -o pipefail
 # ============================
 TIMEOUT=4
 MIN_SPEED=50
-METHODS=("CONNECT" "POST" "HEAD" "GET")
-PORTS=(443 80)   # Check both HTTPS and HTTP
+METHODS=("GET" "HEAD" "POST" "CONNECT")   # GET is now first for accurate speed
+PORTS=(443 80)
 
 # ============================
 # PARSE ARGUMENTS
@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
     --min-speed) MIN_SPEED="$2"; shift ;;
     --help)
       echo "Usage: cat hosts.txt | $0 [--timeout 4] [--min-speed 50]"
-      echo "  Checks port 443 (HTTPS) and 80 (HTTP) for zero-rated hosts."
+      echo "  Uses GET method for accurate speed measurement."
       exit 0
       ;;
     *) echo "Unknown option"; exit 2 ;;
@@ -44,7 +44,7 @@ TOTAL=$(wc -l < "$INPUT")
 [[ $TOTAL -eq 0 ]] && { echo -e "${Y}No hosts.${R}" >&2; exit 3; }
 
 # ============================
-# ZERO‑RATED DETECTION (extended community patterns)
+# ZERO‑RATED DETECTION (community patterns)
 # ============================
 is_free() {
   local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
@@ -62,7 +62,7 @@ clear
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
 echo -e "${BG}${G}         L U P H A H L A   Z E R O - R A T E D   H O S T S            ${R}"
 echo -e "${BG}${G}═══════════════════════════════════════════════════════════════════════${R}"
-echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s, ports 443 & 80)"
+echo -e "  ${C}Mode:${R} STANDARD (speed ≥ ${MIN_SPEED} KB/s, ports 443 & 80, GET first)"
 echo ""
 
 # ============================
@@ -96,10 +96,9 @@ while IFS= read -r host; do
   IP_USED="N/A"
   BEST_PORT=0
 
-  # Try each port
   for port in "${PORTS[@]}"; do
     for method in "${METHODS[@]}"; do
-      output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}|%{time_total}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
+      output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
       code=$(echo "$output" | cut -d'|' -f1)
       ip=$(echo "$output" | cut -d'|' -f2)
       speed_bytes=$(echo "$output" | cut -d'|' -f3)
@@ -111,12 +110,11 @@ while IFS= read -r host; do
         IP_USED="$ip"
         BEST_PORT="$port"
         [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
-        break 2   # exit both loops
+        break 2
       fi
     done
   done
 
-  # --- CLASSIFY STATUS ---
   if [[ "$SUCCESS" == false ]]; then
     STATUS="BLOCKED"
     SPEED_DISPLAY="N/A"
@@ -138,12 +136,11 @@ while IFS= read -r host; do
     fi
   fi
 
-  # --- FILTER: only show fast hosts ---
+  # Only show fast hosts
   if [[ "$STATUS" != "FREE (fast)" ]]; then
     continue
   fi
 
-  # Print row
   printf "\r  %-70s\r" ""
   case "$STATUS" in
     "FREE (fast)") STATUS_COLOR="${G}${STATUS}${R}" ;;
@@ -158,5 +155,5 @@ done < "$INPUT"
 printf "\r  %-70s\r" ""
 echo ""
 echo -e "${G}✓${R} Found: ${C}$FOUND${R} zero-rated hosts (speed ≥ ${MIN_SPEED} KB/s)."
-echo -e "  ${C}Note:${R} Ports 443 (HTTPS) and 80 (HTTP) are checked."
+echo -e "  ${C}Note:${R} GET method is now used first for accurate speeds."
 exit 0
