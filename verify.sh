@@ -40,10 +40,16 @@ done
 R='\033[0m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; BG='\033[92m'; W='\033[37m'; RD='\033[91m'
 
 # ============================
-# SETUP TEMP DIRECTORY (MUST RUN FIRST)
+# SETUP TEMP DIRECTORY (Termux-safe)
 # ============================
-TDIR="/tmp/luphahla_discovery"
-mkdir -p "$TDIR" || { echo -e "${RD}Failed to create temp directory${R}"; exit 1; }
+# Use $TMPDIR if set and writable, otherwise fallback to ~/.cache
+if [[ -n "$TMPDIR" && -w "$TMPDIR" ]]; then
+  TDIR="${TMPDIR}/luphahla_discovery"
+else
+  TDIR="${HOME}/.cache/luphahla_discovery"
+fi
+
+mkdir -p "$TDIR" || { echo -e "${RD}Failed to create temp directory at $TDIR${R}"; exit 1; }
 trap 'rm -rf "$TDIR"' EXIT INT TERM
 FRESH_FILE="$TDIR/fresh_hosts.txt"
 : > "$FRESH_FILE"  # ensure it exists
@@ -199,5 +205,117 @@ echo ""
 # TESTING ENGINE (same as before)
 # ============================
 INPUT="$FRESH_FILE"
-# (rest of the code remains unchanged; I'll include it all for completeness)
-# ... but we already have the full script in the previous message. I'll just put a pointer to that.
+
+is_free() {
+  local h=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+  for p in google youtube facebook meta whatsapp instagram twitter x.com tesla spacex starlink netflix spotify cloudflare amazon microsoft apple icloud live outlook office bing yahoo econet netone mtn vodacom orange airtel safaricom github stackoverflow \
+           econetwireless zigssh roshan etisalat mtnplay goodinternet learningpassport unicef msmehub latamairlines ooguy bundles orgonemoney topup apn vasapi selfcare ibills meet elevateyouth oldlock; do
+    [[ "$h" == *"$p"* ]] && return 0
+  done
+  return 1
+}
+
+# Table headers
+if [[ "$TUNNEL_MODE" == true ]]; then
+  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-8s  %-4s  %-4s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS" "C" "WS"
+  printf "  %-26s  %-10s  %-15s  %-10s  %-8s  %-4s  %-4s\n" "--------------------------" "----------" "---------------" "----------" "--------" "---" "---"
+else
+  printf "  ${C}%-26s  %-10s  %-15s  %-10s  %-8s${R}\n" "HOST" "METHOD" "IP" "SPEED" "STATUS"
+  printf "  %-26s  %-10s  %-15s  %-10s  %-8s\n" "--------------------------" "----------" "---------------" "----------" "--------"
+fi
+
+SPINNER=('|' '/' '-' '\')
+SPIN_IDX=0
+update_spinner() {
+  printf "\r  ${C}%s${R} Scanning..." "${SPINNER[SPIN_IDX]}"
+  ((SPIN_IDX++)); [[ $SPIN_IDX -ge ${#SPINNER[@]} ]] && SPIN_IDX=0
+}
+
+COUNT=0; FOUND=0
+while IFS= read -r host; do
+  ((COUNT++)); update_spinner
+  if ! is_free "$host"; then continue; fi
+
+  SUCCESS=false
+  SPEED_KB=0
+  METHOD_USED=""
+  IP_USED="N/A"
+  CONNECT_SUPPORT="❌"
+  WS_SUPPORT="❌"
+
+  # Ports: 443,80,8080,8443 if tunnel, else just 443,80
+  if [[ "$TUNNEL_MODE" == true ]]; then
+    PORTS=(443 80 8080 8443)
+  else
+    PORTS=(443 80)
+  fi
+
+  for port in "${PORTS[@]}"; do
+    for method in "GET" "HEAD" "POST" "CONNECT"; do
+      output=$(curl -s -k -o /dev/null -w "%{http_code}|%{remote_ip}|%{speed_download}" -X "$method" -m "$TIMEOUT" "$( [[ $port -eq 443 || $port -eq 8443 ]] && echo "https" || echo "http" )://$host:$port" 2>/dev/null)
+      code=$(echo "$output" | cut -d'|' -f1)
+      ip=$(echo "$output" | cut -d'|' -f2)
+      speed_bytes=$(echo "$output" | cut -d'|' -f3)
+      [[ -z "$ip" ]] && ip="N/A"
+
+      if [[ -n "$code" && "$code" != "000" ]]; then
+        SUCCESS=true
+        METHOD_USED="$method"
+        IP_USED="$ip"
+        [[ "$speed_bytes" =~ ^[0-9]+ ]] && SPEED_KB=$((speed_bytes / 1024))
+        break 2
+      fi
+    done
+  done
+
+  if [[ "$SUCCESS" == false ]]; then
+    STATUS="BLOCKED"
+    SPEED_DISPLAY="N/A"
+    METHOD_USED="-"
+    IP_USED="N/A"
+  else
+    # Speed display
+    if (( SPEED_KB == 0 )); then SPEED_DISPLAY="0KB/s"
+    elif (( SPEED_KB > 100 )); then SPEED_DISPLAY="⚡${SPEED_KB}KB/s"
+    else SPEED_DISPLAY="🐢${SPEED_KB}KB/s"; fi
+
+    if (( SPEED_KB >= MIN_SPEED )); then STATUS="FREE"; else STATUS="THROTTLED"; fi
+
+    # Tunnel tests (only if --tunnel)
+    if [[ "$TUNNEL_MODE" == true ]]; then
+      connect_code=$(curl -s -o /dev/null -w "%{http_code}" -X CONNECT -k -m "$TIMEOUT" "https://$host" 2>/dev/null)
+      [[ "$connect_code" =~ ^(200|301|302|405)$ ]] && CONNECT_SUPPORT="✅" || CONNECT_SUPPORT="❌"
+      if curl -s -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" -k -m "$TIMEOUT" "https://$host" 2>/dev/null | grep -q "101 Switching"; then
+        WS_SUPPORT="✅"
+      else
+        WS_SUPPORT="❌"
+      fi
+    fi
+  fi
+
+  if [[ "$SHOW_ALL" == false ]]; then
+    [[ "$STATUS" != "FREE" ]] && continue
+  fi
+
+  printf "\r  %-70s\r" ""
+  STATUS_COLOR="${G}${STATUS}${R}"
+  if [[ "$TUNNEL_MODE" == true ]]; then
+    [[ "$CONNECT_SUPPORT" == "✅" ]] && CONNECT_COLOR="${G}${CONNECT_SUPPORT}${R}" || CONNECT_COLOR="${RD}${CONNECT_SUPPORT}${R}"
+    [[ "$WS_SUPPORT" == "✅" ]] && WS_COLOR="${G}${WS_SUPPORT}${R}" || WS_COLOR="${RD}${WS_SUPPORT}${R}"
+    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}  ${CONNECT_COLOR}%-4s${R}  ${WS_COLOR}%-4s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS" "$CONNECT_SUPPORT" "$WS_SUPPORT"
+  else
+    printf "  ${G}%-26s${R}  ${Y}%-10s${R}  ${C}%-15s${R}  ${W}%-10s${R}  ${STATUS_COLOR}%-8s${R}\n" "$host" "$METHOD_USED" "$IP_USED" "$SPEED_DISPLAY" "$STATUS"
+  fi
+  ((FOUND++))
+done < "$INPUT"
+
+printf "\r  %-70s\r" ""
+echo ""
+if [[ "$TUNNEL_MODE" == true ]]; then
+  echo -e "${G}✓${R} TUNNEL MODE complete. Found ${C}$FOUND${R} hosts."
+  echo -e "  ${C}C${R} = CONNECT support  |  ${C}WS${R} = WebSocket support  |  ✅ = works  |  ❌ = fails"
+else
+  echo -e "${G}✓${R} Found: ${C}$FOUND${R} hosts (speed ≥ ${MIN_SPEED} KB/s)."
+  echo -e "  ${C}Tip:${R} Run with --tunnel for full discovery + CONNECT/WS tests."
+fi
+exit 0
