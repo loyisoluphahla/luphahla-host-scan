@@ -255,8 +255,7 @@ async def scan_target(session, host: str, semaphore) -> ScanResult:
 
 
 async def _scan_single_port(session, host: str, port: int) -> ScanResult:
-    import hashlib  # local import is a no-op; hashlib already global
-
+    
     result = ScanResult(host=host, port=port)
     scheme = "https" if port == 443 else "http"
     url = f"{scheme}://{host}:{port}/"
