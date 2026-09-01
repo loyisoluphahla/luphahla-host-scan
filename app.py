@@ -10,7 +10,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
+import datetime
 import logging
 import time
 from contextlib import asynccontextmanager
