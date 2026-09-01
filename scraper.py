@@ -184,11 +184,9 @@ async def harvest_all(concurrency: int = 8,
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
 
-        # 1) Government / educational TLD sweep (core zero-rating vectors)
+      # 1) Government / educational TLD sweep (core zero-rating vectors)
         for tld in TARGET_TLDS:
-            tld_base = tld.lstrip(".")
-            tasks.append(harvest_crt_sh(session, tld_base := tld_base, semaphore=sem)
-                         if False else harvest_crt_sh(session, tld_base, sem))
+            tasks.append(harvest_crt_sh(session, tld.lstrip("."), sem))
 
         # 2) Operator CT-log sweep
         for org in CT_SEED_ORGS:
