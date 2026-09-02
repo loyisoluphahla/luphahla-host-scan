@@ -1,0 +1,4 @@
+      - name: Keep Render awake + sync check
+        run: |
+          curl -s -o /dev/null -w "Render ping: %{http_code}\n" \
+            https://luphahla-bugscan.onrender.com/healthz || true
