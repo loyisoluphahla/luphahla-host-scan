@@ -1,336 +1,225 @@
-function forceScan() {
-    var btn = $("scanBtn");
-    var sel = $("countrySelect");
-    var cc = sel ? sel.value : state.country;
-    btn.disabled = true;
-    btn.setAttribute("data-loading", "1");
-    $("scanBtnText").textContent = "Starting scan...";
-    $("scanError").hidden = true;
-    toast("Scan started for " + label(cc));
-    return fetchJSON("/api/scan", {
+/* app.js — Luphahla Bugscan dashboard client.
+
+Changes in this version (the "Connecting... / Backend unreachable" fix):
+  1. API_BASE — when the page is NOT served from Render (APK WebView,
+     file://, locally bundled assets), all API calls use the absolute
+     Render origin. Relative URLs previously hit the APK's internal
+     origin and failed.
+  2. Cold-start tolerant fetch — 45s timeout + 1 automatic retry, because
+     the Render free tier can take 30-60s to wake up.
+  3. Defensive rendering — missing summary element IDs are skipped
+     harmlessly instead of throwing.
+*/
+
+(function () {
+"use strict";
+
+// ---------------------------------------------------------------------------
+// API base — CHANGE THIS to your actual Render URL if it differs
+// ---------------------------------------------------------------------------
+
+var SERVICE_URL = window.LUPHAHLA_API_URL || "https://luphahla-bugscan.onrender.com";
+
+function isServiceOrigin() {
+  return /(^|\.)onrender\.com$/.test(location.hostname);
+}
+
+var API_BASE = isServiceOrigin() ? "" : SERVICE_URL;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function $(id) { return document.getElementById(id); }
+
+function setText(id, value) {
+  var el = $(id);
+  if (el) el.textContent = value;
+}
+
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;",
+             '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+function sleep(ms) {
+  return new Promise(function (r) { setTimeout(r, ms); });
+}
+
+function fmtTime(epoch) {
+  if (!epoch) return "—";
+  var d = new Date(epoch * 1000);
+  return d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+}
+
+function fmtInterval(s) {
+  if (!s) return "—";
+  if (s % 3600 === 0) return (s / 3600) + " h";
+  if (s % 60 === 0) return (s / 60) + " min";
+  return s + " s";
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+var state = {
+  config: null, last: null, country: "zw", countries: [],
+  searchTerm: "", sortMode: "fastest", filterVerdict: "working",
+  history: [], lastCycle: 0, pollTimer: null
+};
+
+// ---------------------------------------------------------------------------
+// Fetch — 45s timeout + 1 retry (Render cold start)
+// ---------------------------------------------------------------------------
+
+async function fetchJSON(url, attempt) {
+  attempt = attempt || 1;
+  var controller = new AbortController();
+  var timer = setTimeout(function () { controller.abort(); }, 45000);
+  try {
+    var resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return await resp.json();
+  } catch (err) {
+    if (err.name === "AbortError") {
+      err = new Error("request timed out (service waking up?)");
+    }
+    // Render free tier cold start can take 30-60s — retry once
+    if (attempt < 2) {
+      await sleep(3000);
+      return fetchJSON(url, attempt + 1);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postJSON(url, body) {
+  var controller = new AbortController();
+  var timer = setTimeout(function () { controller.abort(); }, 45000);
+  try {
+    var resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ country: cc })
-    }).then(function (d) {
-      state.country = d.country;
-      pollOnce();
-      return d;
-    }).catch(function (err) {
-      $("scanError").textContent = "Could not start scan: " + err.message;
-      $("scanError").hidden = false;
-      btn.disabled = false;
-      btn.removeAttribute("data-loading");
-      $("scanBtnText").textContent = "Scan this country";
+      body: JSON.stringify(body || {}),
+      signal: controller.signal
     });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return await resp.json();
+  } finally {
+    clearTimeout(timer);
   }
+}
 
-  function switchCountry(cc) {
-    if (!cc || cc === state.country) return;
-    state.country = cc;
-    updateFeedLinks();
+// ---------------------------------------------------------------------------
+// Status pill / error banner / toast
+// ---------------------------------------------------------------------------
+
+function setStatus(mode) {
+  var pill = $("statusPill"), text = $("statusText");
+  if (pill) {
+    pill.className = "status-pill " +
+      (mode === "live" ? "is-live" :
+       mode === "error" ? "is-error" : "is-connecting");
+  }
+  if (text) {
+    text.textContent =
+      mode === "live" ? "LIVE" :
+      mode === "error" ? "Backend unreachable" : "Connecting...";
+  }
+}
+
+function showError(msg) {
+  setText("errorText", msg);
+  if ($("errorBanner")) $("errorBanner").hidden = false;
+}
+
+function hideError() {
+  if ($("errorBanner")) $("errorBanner").hidden = true;
+}
+
+var toastTimer = null;
+
+function toast(msg) {
+  var el = $("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { el.hidden = true; }, 4000);
+}
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
+async function loadConfig() {
+  var cfg = await fetchJSON(API_BASE + "/api/config");
+  state.config = cfg;
+  state.country = cfg.default_country || state.country;
+  renderConfig(cfg);
+  renderCountrySelect();
+  setStatus("live");
+}
+
+async function loadResults() {
+  pollOnce();
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(pollOnce, 30000);
+}
+
+async function pollOnce() {
+  try {
+    var url = API_BASE + "/api/results" +
+      (state.country ? "?country=" + encodeURIComponent(state.country) : "");
+    var data = await fetchJSON(url);
+    state.last = data;
+    renderResults(data);
+    hideError();
+    setStatus("live");
+  } catch (err) {
+    setStatus("error");
+    showError("Backend unreachable: " + err.message);
+  }
+}
+
+function switchCountry(cc) {
+  state.country = cc;
+  renderCountrySelect();
+  updateFeedLinks();
+  pollOnce();
+}
+
+async function forceScan() {
+  try {
+    toast("Rescan requested...");
+    await postJSON(API_BASE + "/api/scan", { country: state.country });
+    toast("Rescan started — verifying hosts now");
     pollOnce();
+  } catch (err) {
+    toast("Rescan failed: " + err.message);
   }
+}
 
-  /* ---------------- cycle events (history log) ---------------- */
+// ---------------------------------------------------------------------------
+// Rendering — config / countries / feed links
+// ---------------------------------------------------------------------------
 
-  function detectCycleEvents(d) {
-    var seen = state.logSeenCycle;
-    var cycle = d.scan_count;
-    if (d.scanning && seen !== -1 && cycle !== seen &&
-        cycle > seen) {
-      pushHistory("Scan cycle #" + cycle + " started", "started");
-    }
-    if (!d.scanning && seen !== -1 && cycle > seen &&
-        d.results.length > 0) {
-      var working = countWorking(d.results);
-      pushHistory("Scan cycle #" + cycle + " complete - " +
-                  working + " verified", "done");
-    }
-    if (seen === -1) {
-      if (d.scanning) {
-        pushHistory("Scan in progress (cycle #" + cycle + ")", "started");
-      } else if (cycle > 0 && d.results.length > 0) {
-        pushHistory("Results loaded (cycle #" + cycle + ")", "done");
-      }
-    }
-    state.logSeenCycle = cycle;
-    renderHistory();
-  }
+function renderConfig(cfg) {
+  setText("cfgService", cfg.tool || "Luphahla Bugscan");
+  setText("cfgDefault", (cfg.default_country || "").toUpperCase());
+  setText("cfgCountries",
+    Object.keys(cfg.countries || {}).length + " regions");
+  setText("cfgPorts", (cfg.ports || []).join(", "));
+  setText("cfgReverify", fmtInterval(cfg.reverify_every_s));
 
-  function pushHistory(text, kind) {
-    state.sessionLog.unshift({
-      text: text, kind: kind, time: new Date()
-    });
-    if (state.sessionLog.length > 50) state.sessionLog.pop();
-  }
-
-  function countWorking(results) {
-    var n = 0;
-    for (var i = 0; i < results.length; i++) {
-      if (results[i].verdict === "fast" ||
-          results[i].verdict === "usable") n++;
-    }
-    return n;
-  }
-
-  /* ---------------- rendering ---------------- */
-
-  function renderAll() {
-    var d = state.last;
-    renderStatus(d);
-    renderSummary(d);
-    renderTop3(d);
-    renderMiniList(d);
-    renderHosts(d);
-  }
-
-  function renderStatus(d) {
-    var pill = $("statusPill");
-    var text = $("statusText");
-    if (d.scanning) {
-      pill.className = "status-pill is-scanning";
-      text.textContent = "Scanning";
-    } else if (d.last_error) {
-      pill.className = "status-pill is-error";
-      text.textContent = "Scan error";
-    } else if (d.scan_count > 0) {
-      pill.className = "status-pill is-idle";
-      text.textContent = "Live";
-    } else {
-      pill.className = "status-pill is-connecting";
-      text.textContent = "First scan...";
-    }
-
-    $("actTitle").textContent = d.scanning
-      ? "Scan engine running"
-      : "Scan engine idle";
-    $("actPhase").textContent = d.scanning ? (d.phase || "working") : "";
-    $("actBarWrap").hidden = !d.scanning;
-    $("actLast").textContent =
-      "Last completed scan: " + fmtTime(d.last_scan_epoch) +
-      (d.last_error ? "  |  Last error: " + d.last_error : "");
-  }
-
-  function renderSummary(d) {
-    $("ovVerified").textContent = countWorking(d.results);
-    $("ovScanned").textContent = d.results.length;
-    $("statLastScan").textContent = fmtTime(d.last_scan_epoch);
-    $("statCycle").textContent = "#" + d.scan_count;
-    $("statCountry").textContent = label(d.country);
-    if (state.cfg) {
-      $("statReverify").textContent = fmtInterval(state.cfg.reverify_every_s);
-    }
-  }
-
-  function renderTop3(d) {
-    var grid = $("top3Grid");
-    var empty = $("top3Empty");
-    var working = getWorking(d.results).slice(0, 3);
-    $("top3Country").textContent = label(d.country);
-    if (!working.length) {
-      grid.innerHTML = "";
-      empty.hidden = false;
-      return;
-    }
-    empty.hidden = true;
-    var medals = ["1", "2", "3"];
-    var html = "";
-    for (var i = 0; i < working.length; i++) {
-      var r = working[i];
-      html +=
-        '<div class="podium p-' + (i + 1) + '">' +
-        '<div class="rank">' + medals[i] + '</div>' +
-        '<span class="p-host">' + esc(r.host) + '</span>' +
-        '<div class="p-stats">' +
-        '<span class="p-speed">' + fmtSpeed(r.speed_kbps) + '</span>' +
-        '<span>' + esc(String(r.verdict).toUpperCase()) +
-        ' &middot; port ' + r.port + '</span>' +
-        '</div></div>';
-    }
-    grid.innerHTML = html;
-  }
-
-  function renderMiniList(d) {
-    var list = $("miniList");
-    var empty = $("miniEmpty");
-    var working = getWorking(d.results).slice(0, 5);
-    if (!working.length) {
-      list.innerHTML = "";
-      empty.hidden = false;
-      return;
-    }
-    empty.hidden = true;
-    var html = "";
-    for (var i = 0; i < working.length; i++) {
-      var r = working[i];
-      html +=
-        '<div class="mini-row">' +
-        '<span class="mini-host">' + esc(r.host) + '</span>' +
-        '<span class="mini-speed">' + fmtSpeed(r.speed_kbps) + '</span>' +
-        '</div>';
-    }
-    list.innerHTML = html;
-  }
-
-  function getWorking(results) {
-    var out = [];
-    for (var i = 0; i < results.length; i++) {
-      var v = results[i].verdict;
-      if (v === "fast" || v === "usable") out.push(results[i]);
-    }
-    out.sort(function (a, b) {
-      if ((a.verdict === "fast") !== (b.verdict === "fast")) {
-        return a.verdict === "fast" ? -1 : 1;
-      }
-      return (b.speed_kbps || 0) - (a.speed_kbps || 0);
-    });
-    return out;
-  }
-
-  /* ---------------- hosts table ---------------- */
-
-  function renderHosts(d) {
-    var body = $("rowsBody");
-    var noRows = $("noRows");
-    var results = d.results;
-    var rows = filterRows(results);
-    $("hostCount").textContent = rows.length + " of " +
-      results.length + " hosts";
-    $("hostsCountry").textContent = label(d.country);
-
-    if (!rows.length) {
-      body.innerHTML = "";
-      noRows.hidden = false;
-      $("noRowsMsg").textContent = results.length
-        ? "No results match your filter."
-        : (d.scanning
-           ? "Scan in progress - hosts appear when the quick pass lands."
-           : "No results yet. Start a scan below.");
-      return;
-    }
-    noRows.hidden = true;
-
-    var html = "";
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      html +=
-        '<tr data-host="' + esc(r.host) + '" data-index="' + i + '">' +
-        '<td class="host-row-num">' + (i + 1) + '</td>' +
-        '<td class="row-host">' + esc(r.host) + '</td>' +
-        '<td class="host-port">' + r.port + '</td>' +
-        '<td>' + pillHTML(r.verdict) + '</td>' +
-        '<td>' + speedHTML(r.speed_kbps) + '</td>' +
-        '<td class="trend-cell">' + trendHTML(r) + '</td>' +
-        '</tr>';
-    }
-    body.innerHTML = html;
-  }
-
-  function filterRows(results) {
-    var term = state.searchTerm;
-    var rows = [];
-    for (var i = 0; i < results.length; i++) {
-      var r = results[i];
-      if (state.filterVerdict === "working" &&
-          !(r.verdict === "fast" || r.verdict === "usable")) continue;
-      if (state.filterVerdict === "blocked" &&
-          (r.verdict === "fast" || r.verdict === "usable")) continue;
-      if ((state.filterVerdict === "fast" ||
-           state.filterVerdict === "usable") &&
-          r.verdict !== state.filterVerdict) continue;
-      if (term && r.host.indexOf(term) === -1) continue;
-      rows.push(r);
-    }
-    var mode = state.sortMode;
-    rows.sort(function (a, b) {
-      if (mode === "slowest") {
-        return (a.speed_kbps || 0) - (b.speed_kbps || 0);
-      }
-      if (mode === "name-asc") return a.host.localeCompare(b.host);
-      if (mode === "name-desc") return b.host.localeCompare(a.host);
-      if (mode === "port") return a.port - b.port || a.host.localeCompare(b.host);
-      return (b.speed_kbps || 0) - (a.speed_kbps || 0);
-    });
-    return rows;
-  }
-
-  function pillHTML(verdict) {
-    var cls = { "fast": "p-fast", "usable": "p-usable",
-                "throttled": "p-throttled", "tls-blocked": "p-tls-blocked",
-                "proxy-mitm": "p-proxy-mitm", "blocked": "p-blocked" }[verdict];
-    if (!cls) cls = "p-blocked";
-    return '<span class="pill ' + cls + '"><span class="pdot"></span>' +
-           esc(verdict) + '</span>';
-  }
-
-  function speedHTML(kbps) {
-    if (kbps == null) return '<span class="speed-cell nil">-</span>';
-    var cls = kbps >= 10 ? "ok" : "";
-    return '<span class="speed-cell ' + cls + '">' +
-           Number(kbps).toFixed(2) + '</span>';
-  }
-
-  function trendHTML(r) {
-    var key = r.host + ":" + r.port;
-    var prev = state.speedHistory[key];
-    var cur = r.speed_kbps;
-    if (cur != null) state.speedHistory[key] = cur;
-    var svg = '';
-    if (cur == null) {
-      return '<span class="delta flat">n/a</span>';
-    }
-    if (prev == null || cur === prev) {
-      svg = '<svg class="trend-svg" viewBox="0 0 20 12" width="20" height="12" aria-hidden="true">' +
-            '<path d="M1 6h18" stroke="#6b7280" stroke-width="1.6" stroke-linecap="round"/></svg>';
-      return svg + '<span class="delta flat">stable</span>';
-    }
-    if (cur > prev) {
-      svg = '<svg class="trend-svg" viewBox="0 0 20 12" width="20" height="12" aria-hidden="true">' +
-            '<path d="M1 10 L10 2 L19 10 M10 2 v0" stroke="#22d3ee" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-      return svg + '<span class="delta up">up</span>';
-    }
-    svg = '<svg class="trend-svg" viewBox="0 0 20 12" width="20" height="12" aria-hidden="true">' +
-          '<path d="M1 2 L10 10 L19 2" stroke="#ff5fa2" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    return svg + '<span class="delta down">down</span>';
-  }
-
-  /* ---------------- history ---------------- */
-
-  function renderHistory() {
-    var list = $("historyList");
-    var empty = $("historyEmpty");
-    if (!state.sessionLog.length) {
-      list.innerHTML = "";
-      empty.hidden = false;
-      return;
-    }
-    empty.hidden = true;
-    var html = "";
-    for (var i = 0; i < state.sessionLog.length; i++) {
-      var h = state.sessionLog[i];
-      html +=
-        '<div class="hist-row">' +
-        '<div class="hist-main">' +
-        '<span class="hist-dot ' + esc(h.kind) + '"></span>' +
-        '<div><div>' + esc(h.text) + '</div>' +
-        '<div class="hist-meta">' + h.time.toISOString() + '</div></div>' +
-        '</div></div>';
-    }
-    list.innerHTML = html;
-  }
-
-  /* ---------------- config / countries ---------------- */
-
-  function renderConfig(cfg) {
-    $("cfgService").textContent = cfg.tool || "Luphahla Bugscan";
-    $("cfgDefault").textContent =
-      (cfg.default_country || "").toUpperCase();
-    $("cfgCountries").textContent =
-      Object.keys(cfg.countries).length + " regions";
-    $("cfgPorts").textContent = (cfg.ports || []).join(", ");
-    $("cfgReverify").textContent = fmtInterval(cfg.reverify_every_s);
-    if (cfg.endpoints) {
-      var list = $("cfgEndpoints");
+  if (cfg.endpoints) {
+    var list = $("cfgEndpoints");
+    if (list) {
       list.innerHTML = "";
       for (var name in cfg.endpoints) {
         if (!Object.prototype.hasOwnProperty.call(cfg.endpoints, name)) continue;
@@ -339,108 +228,356 @@ function forceScan() {
         list.appendChild(li);
       }
     }
-    if (cfg.ports && $("scanPorts")) {
-      $("scanPorts").textContent = cfg.ports.join(", ");
+  }
+  if (cfg.ports && $("scanPorts")) {
+    $("scanPorts").textContent = cfg.ports.join(", ");
+  }
+  setText("sumCountry", (cfg.default_country || "").toUpperCase());
+}
+
+function renderCountrySelect() {
+  var sel = $("countrySelect");
+  if (!sel) return;
+
+  state.countries = [];
+  var cfg = state.config || {};
+  for (var code function renderCountrySelect() {
+  var sel = $("countrySelect");
+  if (!sel) return;
+
+  state.countries = [];
+  var cfg = state.config || {};
+  for (var code in cfg.countries) {
+    if (!Object.prototype.hasOwnProperty.call(cfg.countries, code)) continue;
+    state.countries.push({ code: code,
+                           label: cfg.countries[code].label || code.toUpperCase() });
+  }
+
+  var html = "";
+  for (var i = 0; i < state.countries.length; i++) {
+    var c = state.countries[i];
+    html += '<option value="' + esc(c.code) + '"' +
+            (c.code === state.country ? " selected" : "") + ">" +
+            esc(c.label) + "</option>";
+  }
+  sel.innerHTML = html;
+  sel.value = state.country;
+  updateFeedLinks();
+}
+
+function updateFeedLinks() {
+  var cc = encodeURIComponent(state.country);
+  if ($("feedHosts")) $("feedHosts").href = "/hosts?country=" + cc;
+  if ($("feedTop")) $("feedTop").href = "/top?country=" + cc;
+  if ($("feedApi")) $("feedApi").href = "/api/results?country=" + cc;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — results / summary / top3 / host table
+// ---------------------------------------------------------------------------
+
+function countWorking(rows) {
+  var n = 0;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].verdict === "fast" || rows[i].verdict === "usable") n++;
+  }
+  return n;
+}
+
+function filterRows(rows) {
+  var out = [];
+  var term = state.searchTerm;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (state.filterVerdict === "working" &&
+        r.verdict !== "fast" && r.verdict !== "usable") continue;
+    if (state.filterVerdict === "fast" && r.verdict !== "fast") continue;
+    if (state.filterVerdict === "usable" && r.verdict !== "usable") continue;
+    if (state.filterVerdict === "blocked" &&
+        r.verdict === "fast" && r.verdict === "usable") continue;
+    if (state.filterVerdict === "all" || state.filterVerdict === "blocked") {
+      // "all" passes everything; "blocked" passes everything non-working
+      if (state.filterVerdict === "blocked" &&
+          (r.verdict === "fast" || r.verdict === "usable")) continue;
     }
+    if (term && r.host.toLowerCase().indexOf(term) === -1) continue;
+    out.push(r);
   }
+  return sortRows(out);
+}
 
-  function renderCountrySelect() {
-    var sel = $("countrySelect");
-    if (!sel) return;
-    var html = "";
-    for (var i = 0; i < state.countries.length; i++) {
-      var c = state.countries[i];
-      html += '<option value="' + esc(c.code) + '"' +
-              (c.code === state.country ? " selected" : "") + '>' +
-              esc(c.label) + '</option>';
-    }
-    sel.innerHTML = html;
-    sel.value = state.country;
-    updateFeedLinks();
-  }
-
-  function updateFeedLinks() {
-    var cc = encodeURIComponent(state.country);
-    $("feedHosts").href = "/hosts?country=" + cc;
-    $("feedTop").href = "/top?country=" + cc;
-    $("feedApi").href = "/api/results?country=" + cc;
-  }
-
-  /* ---------------- errors ---------------- */
-
-  function showError(msg) {
-    $("errorText").textContent = msg;
-    $("errorBanner").hidden = false;
-  }
-  function hideError() {
-    $("errorBanner").hidden = true;
-  }
-
-  /* ---------------- view switching ---------------- */
-
-  function gotoView(name) {
-    var views = document.querySelectorAll(".view");
-    for (var i = 0; i < views.length; i++) {
-      views[i].hidden = views[i].getAttribute("data-view") !== name;
-    }
-    var btns = document.querySelectorAll("[data-goto]");
-    for (var j = 0; j < btns.length; j++) {
-      var b = btns[j];
-      var on = b.getAttribute("data-goto") === name;
-      if (b.classList.contains("nav-btn") ||
-          b.classList.contains("mobile-menu")) {
-        b.classList.toggle("is-active", on);
-      }
-    }
-    var menu = $("mobileMenu");
-    if (!menu.hidden) {
-      menu.hidden = true;
-      $("menuBtn").setAttribute("aria-expanded", "false");
-    }
-    window.scrollTo({ top: 0 });
-  }
-
-  /* ---------------- wiring ---------------- */
-
-  function wire() {
-    document.addEventListener("click", function (ev) {
-      var el = ev.target.closest("[data-goto]");
-      if (el) {
-        ev.preventDefault();
-        var name = el.getAttribute("data-goto");
-        if (name === "scan") {
-          var btn = $("scanBtn");
-          if (btn) btn.focus({ preventScroll: true });
-        }
-        gotoView(name);
-      }
+function sortRows(rows) {
+  var sorted = rows.slice();
+  if (state.sortMode === "fastest") {
+    sorted.sort(function (a, b) {
+      var w = verdictRank(a) - verdictRank(b);
+      if (w) return w;
+      return (b.speed_kbps || 0) - (a.speed_kbps || 0);
     });
+  } else if (state.sortMode === "name") {
+    sorted.sort(function (a, b) { return a.host < b.host ? -1 : 1; });
+  } else if (state.sortMode === "status") {
+    sorted.sort(function (a, b) {
+      return (a.status_code || 999) - (b.status_code || 999);
+    });
+  }
+  return sorted;
+}
 
+function verdictRank(r) {
+  return r.verdict === "fast" ? 0 :
+         r.verdict === "usable" ? 1 : 2;
+}
+
+function verdictClass(v) {
+  return v === "fast" ? "v-fast" :
+         v === "usable" ? "v-usable" :
+         v === "throttled" ? "v-throt" :
+         v === "proxy-mitm" ? "v-mitm" : "v-tls";
+}
+
+function renderResults(data) {
+  var rows = data.results || [];
+  var working = countWorking(rows);
+
+  // --- summary card (all defensive — missing IDs are skipped) ---
+  setText("verifiedCount", working + " / " + rows.length);
+  setText("hostsCount", rows.length + " scanned");
+  setText("sumCountry", (data.country || "").toUpperCase());
+  setText("lastScan", data.last_epoch ? fmtTime(data.last_epoch) : "—");
+  setText("lastCycle", data.scan_count ? "cycle #" + data.scan_count : "—");
+  setText("scanCount", rows.length ? rows.length + " hosts" : "—");
+  setText("scanPorts", (data.ports || []).join(", "));
+  setText("scanPhase", data.phase || (data.scanning ? "scanning" : "idle"));
+
+  var phase = $("scanPhase");
+  if (phase) {
+    phase.className = data.scanning ? "phase is-scanning" : "phase is-idle";
+  }
+
+  // --- top 3 fastest working hosts ---
+  var fast = rows.filter(function (r) { return r.verdict === "fast"; })
+    .sort(function (a, b) { return (b.speed_kbps || 0) - (a.speed_kbps || 0); })
+    .slice(0, 3);
+
+  var topList = $("topFastList");
+  if (topList) {
+    if (!fast.length) {
+      topList.innerHTML = '<div class="empty-state">No verified hosts yet - ' +
+        'the first scan is still gathering data.</div>';
+    } else {
+      topList.innerHTML = fast.map(function (r) {
+        return '<div class="top-row"><span class="mono">' + esc(r.host) +
+          "</span><span>" + fmtKbps(r.speed_kbps) + "</span></div>";
+      }).join("");
+    }
+  }
+
+  // --- recently verified (first 5 working) ---
+  var recentList = $("recentList");
+  if (recentList) {
+    var recent = rows.filter(function (r) {
+      return r.verdict === "fast" || r.verdict === "usable";
+    }).slice(0, 5);
+    recentList.innerHTML = recent.length
+      ? recent.map(function (r) {
+          return '<div class="recent-row"><span class="mono">' + esc(r.host) +
+            ":" + r.port + "</span><span>" + esc(r.verdict) + "</span></div>";
+        }).join("")
+      : '<div class="empty-state">Nothing verified yet.</div>';
+  }
+
+  // --- host table ---
+  renderHosts(data);
+
+  // --- cycle history (new cycles observed this session) ---
+  detectCycleEvents(data);
+}
+
+function fmtKbps(kbps) {
+  if (kbps == null) return "—";
+  if (kbps >= 1000) return (kbps / 1000).toFixed(1) + " MB/s";
+  return kbps.toFixed(1) + " KB/s";
+}
+
+function renderHosts(data) {
+  var rows = filterRows(data.results || []);
+  var body = $("rowsBody");
+  var counter = $("hostsCounter");
+
+  if (counter) counter.textContent = rows.length + " hosts";
+  if (!body) return;
+
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">' +
+      (state.last && (state.last.results || []).length
+        ? "No results match."
+        : "No hosts yet — start a scan.") +
+      "</td></tr>";
+    if ($("emptyState")) $("emptyState").hidden = true;
+    return;
+  }
+
+  var html = "";
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    html +=
+      '<tr data-host="' + esc(r.host) + '" data-index="' + i + '">' +
+      "<td>" + (i + 1) + "</td>" +
+      '<td class="mono">' + esc(r.host) + "</td>" +
+      "<td>" + r.port + "</td>" +
+      '<td class="' + verdictClass(r.verdict) + '">' + esc(r.verdict) + "</td>" +
+      "<td>" + fmtKbps(r.speed_kbps) + "</td>" +
+      "<td>" + esc(r.server_header || "—") + "</td>" +
+      "</tr>";
+  }
+  body.innerHTML = html;
+  if ($("emptyState")) $("emptyState").hidden = true;
+}
+
+// ---------------------------------------------------------------------------
+// Cycle history
+// ---------------------------------------------------------------------------
+
+function detectCycleEvents(data) {
+  var cycle = data.scan_count || 0;
+  var working = countWorking(data.results || []);
+
+  if (state.lastCycle === 0) {
+    if (data.scanning) {
+      pushHistory("Scan in progress (cycle #" + cycle + ")", "started");
+    } else if (cycle > 0) {
+      pushHistory("Results loaded (cycle #" + cycle + ") - " +
+                  working + " verified", "done");
+    }
+  } else if (cycle > state.lastCycle) {
+    pushHistory("Scan cycle #" + cycle + " complete - " +
+                working + " verified", "done");
+  }
+  state.lastCycle = Math.max(state.lastCycle, cycle);
+  renderHistory();
+}
+
+function pushHistory(text, kind) {
+  state.history.unshift({ text: text, kind: kind || "done",
+                          time: fmtTime(Date.now() / 1000) });
+  if (state.history.length > 50) state.history.length = 50;
+}
+
+function renderHistory() {
+  var list = $("historyList"), empty = $("historyEmpty");
+  if (empty) empty.hidden = state.history.length > 0;
+  if (!list) return;
+  list.innerHTML = state.history.map(function (h) {
+    return '<div class="history-row is-' + esc(h.kind) + '">' +
+           "<span>" + esc(h.text) + "</span><span>" +
+           esc(h.time) + "</span></div>";
+  }).join("");
+}
+
+// ---------------------------------------------------------------------------
+// View switching
+// ---------------------------------------------------------------------------
+
+function gotoView(name) {
+  var views = document.querySelectorAll(".view");
+  for (var i = 0; i < views.length; i++) {
+    views[i].hidden = views[i].getAttribute("data-view") !== name;
+  }
+  var btns = document.querySelectorAll("[data-goto]");
+  for (var j = 0; j < btns.length; j++) {
+    var b = btns[j];
+    var on = b.getAttribute("data-goto") === name;
+    if (b.classList.contains("nav-btn") ||
+        b.classList.contains("mobile-menu")) {
+      b.classList.toggle("is-active", on);
+    }
+  }
+  var menu = $("mobileMenu");
+  if (menu && !menu.hidden) {
+    menu.hidden = true;
+    if ($("menuBtn")) $("menuBtn").setAttribute("aria-expanded", "false");
+  }
+  window.scrollTo({ top: 0 });
+}
+
+// ---------------------------------------------------------------------------
+// Row detail (tap a row for host info)
+// ---------------------------------------------------------------------------
+
+function toggleDetail(tr) {
+  var next = tr.nextElementSibling;
+  if (next && next.classList.contains("detail-row")) {
+    next.remove();
+    return;
+  }
+  var idx = Number(tr.getAttribute("data-index"));
+  var rows = filterRows((state.last && state.last.results) || []);
+  var r = rows[idx];
+  if (!r) return;
+  var detail = document.createElement("tr");
+  detail.className = "detail-row";
+  detail.innerHTML =
+    "<td></td>" +
+    '<td colspan="5"><div class="detail-grid">' +
+    '<div><b>Host:</b> <a class="host-link" href="' + API_BASE +
+    '/api/results" target="_blank" rel="noopener">' + esc(r.host) + "</a></div>" +
+    '<div><b>Port:</b> ' + r.port + "</div>" +
+    '<div><b>Verdict:</b> ' + esc(r.verdict) + "</div>" +
+    '<div><b>Reason:</b> ' + esc(r.reason || "n/a") + "</div>" +
+    '<div><b>Latency:</b> ' + (r.latency_ms != null ? r.latency_ms + " ms" : "n/a") + "</div>" +
+    '<div><b>Status code:</b> ' + (r.status_code != null ? r.status_code : "n/a") + "</div>" +
+    '<div><b>Server header:</b> ' + esc(r.server_header || "n/a") + "</div>" +
+    "</div></td>";
+  tr.after(detail);
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+function wire() {
+  document.addEventListener("click", function (ev) {
+    var el = ev.target.closest("[data-goto]");
+    if (el) {
+      ev.preventDefault();
+      gotoView(el.getAttribute("data-goto"));
+    }
+  });
+
+  if ($("menuBtn")) {
     $("menuBtn").addEventListener("click", function () {
       var menu = $("mobileMenu");
       var open = menu.hidden;
       menu.hidden = !open;
       this.setAttribute("aria-expanded", open ? "true" : "false");
     });
+  }
 
-    $("retryBtn").addEventListener("click", pollOnce);
+  if ($("retryBtn")) $("retryBtn").addEventListener("click", pollOnce);
+  if ($("scanBtn")) $("scanBtn").addEventListener("click", forceScan);
 
-    $("scanBtn").addEventListener("click", forceScan);
-
+  if ($("countrySelect")) {
     $("countrySelect").addEventListener("change", function () {
       switchCountry(this.value);
     });
+  }
 
+  if ($("hSearch")) {
     $("hSearch").addEventListener("input", function () {
       state.searchTerm = this.value.trim().toLowerCase();
       renderHosts(state.last);
     });
+  }
 
+  if ($("hSort")) {
     $("hSort").addEventListener("change", function () {
       state.sortMode = this.value;
       renderHosts(state.last);
     });
+  }
 
+  if ($("chipGroup")) {
     $("chipGroup").addEventListener("click", function (ev) {
       var chip = ev.target.closest(".chip[data-verdict]");
       if (!chip) return;
@@ -453,13 +590,15 @@ function forceScan() {
       }
       renderHosts(state.last);
     });
+  }
 
+  if ($("filterReset")) {
     $("filterReset").addEventListener("click", function () {
       state.filterVerdict = "working";
       state.searchTerm = "";
       state.sortMode = "fastest";
-      $("hSearch").value = "";
-      $("hSort").value = "fastest";
+      if ($("hSearch")) $("hSearch").value = "";
+      if ($("hSort")) $("hSort").value = "fastest";
       var chips = document.querySelectorAll("#chipGroup .chip[data-verdict]");
       for (var i = 0; i < chips.length; i++) {
         var on = chips[i].getAttribute("data-verdict") === "working";
@@ -468,58 +607,45 @@ function forceScan() {
       }
       renderHosts(state.last);
     });
+  }
 
+  if ($("goScanEmpty")) {
     $("goScanEmpty").addEventListener("click", function () {
       gotoView("scan");
     });
+  }
 
+  if ($("rowsBody")) {
     $("rowsBody").addEventListener("click", function (ev) {
       var tr = ev.target.closest("tr[data-host]");
       if (!tr) return;
       toggleDetail(tr);
     });
   }
+}
 
-  function toggleDetail(tr) {
-    var next = tr.nextElementSibling;
-    if (next && next.classList.contains("detail-row")) {
-      next.remove();
-      return;
-    }
-    var idx = Number(tr.getAttribute("data-index"));
-    var rows = filterRows(state.last.results);
-    var r = rows[idx];
-    if (!r) return;
-    var detail = document.createElement("tr");
-    detail.className = "detail-row";
-    detail.innerHTML =
-      '<td></td>' +
-      '<td colspan="5"><div class="detail-grid">' +
-      '<div><b>Host:</b> <a class="host-link" href="/api/results" target="_blank" rel="noopener">' + esc(r.host) + '</a></div>' +
-      '<div><b>Reason:</b> ' + esc(r.reason || "n/a") + '</div>' +
-      '<div><b>Latency:</b> ' + (r.latency_ms != null ? r.latency_ms + " ms" : "n/a") + '</div>' +
-      '<div><b>Status code:</b> ' + (r.status_code != null ? r.status_code : "n/a") + '</div>' +
-      '<div><b>Server header:</b> ' + esc(r.server_header || "n/a") + '</div>' +
-      '</div></td>';
-    tr.after(detail);
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+async function boot() {
+  wire();
+  gotoView("overview");
+  setStatus("connecting");
+  try {
+    await loadConfig();
+    await loadResults();
+  } catch (err) {
+    setStatus("error");
+    showError("Could not reach the backend: " + err.message +
+              " — check your connection and tap Retry.");
   }
+}
 
-  /* ---------------- boot ---------------- */
-
-  function boot() {
-    wire();
-    gotoView("overview");
-    loadConfig()
-      .then(loadResults)
-      .catch(function (err) {
-        showError("Could not load config: " + err.message);
-      });
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
 
 })();
