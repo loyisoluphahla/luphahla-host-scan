@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<meta name="theme-color" content="#07040d">
+<title>Luphahla Bugscan - Network Diagnostics</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true"><span>L</span></div>
+    <div class="brand-text">
+      <h1>Luphahla Bugscan</h1>
+      <p>Network Diagnostics</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <div id="statusPill" class="status-pill is-connecting" role="status">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="statusText">Connecting...</span>
+    </div>
+    <button id="menuBtn" class="menu-btn" aria-label="Open menu"
+            aria-expanded="false" aria-controls="mobileMenu">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<nav id="mobileMenu" class="mobile-menu" hidden aria-label="Menu">
+  <a href="#" data-goto="overview">Overview</a>
+  <a href="#" data-goto="hosts">Hosts</a>
+  <a href="#" data-goto="scan">Scan</a>
+  <a href="#" data-goto="history">History</a>
+  <a href="#" data-goto="settings">Settings</a>
+  <div class="menu-feeds">Raw feeds</div>
+  <a href="/hosts" target="_blank" rel="noopener">/hosts (text)</a>
+  <a href="/top" target="_blank" rel="noopener">/top (text)</a>
+  <a href="/api/results" target="_blank" rel="noopener">/api/results (json)</a>
+</nav>
+
+<main id="main" class="container">
+
+  <div id="errorBanner" class="banner is-error" role="alert" hidden>
+    <span id="errorText">Backend unreachable.</span>
+    <button id="retryBtn" class="btn btn-small">Retry now</button>
+  </div>
+
+  <!-- ============ OVERVIEW ============ -->
+  <section class="view" data-view="overview" aria-label="Overview">
+
+    <section class="card summary-card">
+      <h2 class="card-title">Scan Summary</h2>
+      <div class="summary-grid">
+        <div class="metric metric-hero">
+          <div class="metric-big">
+            <span id="ovVerified">-</span><span class="slash">/</span><span id="ovScanned">-</span>
+          </div>
+          <div class="metric-label">Verified / Scanned hosts</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="statLastScan">-</div>
+          <div class="metric-label">Last scan</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="statCycle">-</div>
+          <div class="metric-label">Cycle</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="statCountry">-</div>
+          <div class="metric-label">Country</div>
+        </div>
+      </div>
+      <div class="reverify-note" id="statReverify">Auto-reverify every 2 hours</div>
+    </section>
+
+    <section class="card activity-card">
+      <div class="activity-head">
+        <div class="activity-title" id="actTitle">Scan engine idle</div>
+        <div class="activity-phase" id="actPhase"></div>
+      </div>
+      <div id="actBarWrap" class="progress" hidden>
+        <div id="actBar" class="progress-bar"></div>
+      </div>
+      <div id="actLast" class="activity-last"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2 class="card-title">Top 3 Fastest Hosts</h2>
+        <span class="country-tag" id="top3Country"></span>
+      </div>
+      <div id="top3Grid" class="top3-grid"></div>
+      <div id="top3Empty" class="empty-state" hidden>
+        No verified hosts yet - the first scan is still gathering data.
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2 class="card-title">Recently Verified</h2>
+        <button class="link-btn" data-goto="hosts">View all</button>
+      </div>
+      <div id="miniList" class="mini-list"></div>
+      <div id="miniEmpty" class="empty-state" hidden>
+        Nothing verified yet. Head to <a href="#" data-goto="scan">Scan</a>
+        to trigger a country scan.
+      </div>
+    </section>
+  </section>
+
+  <!-- ============ HOSTS ============ -->
+  <section class="view" data-view="hosts" aria-label="Hosts" hidden>
+    <section class="card">
+      <div class="section-head">
+        <h2 class="card-title">Host Results</h2>
+        <span class="country-tag" id="hostsCountry"></span>
+      </div>
+
+      <div class="toolbar">
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <input id="hSearch" type="search" placeholder="Search hostname..."
+                 aria-label="Search hostname">
+        </div>
+        <label class="sort-label" for="hSort">Sort</label>
+        <select id="hSort" class="select">
+          <option value="fastest">Fastest</option>
+          <option value="slowest">Slowest</option>
+          <option value="name-asc">Hostname A-Z</option>
+          <option value="name-desc">Hostname Z-A</option>
+          <option value="port">Port</option>
+        </select>
+      </div>
+
+      <div id="chipGroup" class="chips" role="group" aria-label="Filter by verdict">
+        <button class="chip is-on" data-verdict="working">Working</button>
+        <button class="chip" data-verdict="fast">FAST</button>
+        <button class="chip" data-verdict="usable">Usable</button>
+        <button class="chip" data-verdict="blocked">Blocked</button>
+        <button class="chip" data-verdict="all">All</button>
+        <button id="filterReset" class="chip chip-ghost">Reset</button>
+      </div>
+
+      <div class="table-meta">
+        <span id="hostCount">0 hosts</span>
+        <span class="table-hint">Tap a row for details</span>
+      </div>
+
+      <div class="table-scroll">
+        <table class="host-table">
+          <thead>
+            <tr>
+              <th scope="col" class="col-num">#</th>
+              <th scope="col">Host</th>
+              <th scope="col" class="col-port">Port</th>
+              <th scope="col">Verdict</th>
+              <th scope="col">KB/s</th>
+              <th scope="col">Trend</th>
+            </tr>
+          </thead>
+          <tbody id="rowsBody"></tbody>
+        </table>
+        <div id="noRows" class="empty-state" hidden>
+          <p id="noRowsMsg">No results match.</p>
+          <button id="goScanEmpty" class="btn" data-goto="scan">Start a scan</button>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ============ SCAN ============ -->
+  <section class="view" data-view="scan" aria-label="Scan" hidden>
+    <section class="card scan-card">
+      <h2 class="card-title">Country / ISP Scanner</h2>
+      <p class="muted" id="scanSub">Scan hosts reachable through a country's ISPs and zero-rated services.</p>
+
+      <label class="field-label" for="countrySelect">Scan within country ISP:</label>
+      <div class="scan-controls">
+        <select id="countrySelect" class="select select-big"
+                aria-label="Country / ISP region"></select>
+        <button id="scanBtn" class="btn btn-grad btn-big">
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span id="scanBtnText">Scan this country</span>
+        </button>
+      </div>
+
+      <div id="scanError" class="banner is-warn" role="alert" hidden></div>
+
+      <div id="scanProgress" class="scan-progress" hidden>
+        <div class="scan-progress-head">
+          <span id="scanPhase" class="scan-phase">Starting...</span>
+          <span id="scanSpinner" class="mini-spinner" aria-hidden="true"></span>
+        </div>
+        <div class="progress"><div class="progress-bar indeterminate"></div></div>
+        <div class="scan-meta" id="scanLastInfo"></div>
+      </div>
+
+      <dl class="info-list">
+        <div><dt>Scanning on port</dt><dd id="scanPorts">443, 8080, 80</dd></div>
+        <div><dt>Protocol</dt><dd>TLS/SNI handshake + HTTP content verification</dd></div>
+        <div><dt>Auto-reverify</dt><dd id="scanReverify">-</dd></div>
+        <div><dt>Current results</dt><dd id="scanCountNow">-</dd></div>
+      </dl>
+
+      <div class="feed-links">
+        <span>Feeds for selected country:</span>
+        <a id="feedHosts" href="/hosts" target="_blank" rel="noopener">/hosts</a>
+        <a id="feedTop" href="/top" target="_blank" rel="noopener">/top</a>
+        <a id="feedApi" href="/api/results" target="_blank" rel="noopener">/api/results</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">How to use results</h2>
+      <ul class="tips">
+        <li><strong>Global scan verdicts</strong> (this dashboard) prove a host
+        answers fast from the internet - not that your SIM is allowed through.</li>
+        <li>The <strong>true zero-rating test</strong> is the offline probe:
+        <code>python main.py --no-scrape --probe</code> on your zero-balance SIM
+        (mobile data ON, Wi-Fi OFF).</li>
+        <li>Paste verified <code>host:443</code> entries into HA Tunnel Plus /
+        Stark VPN and confirm each on the actual carrier.</li>
+      </ul>
+    </section>
+  </section>
+
+  <!-- ============ HISTORY ============ -->
+  <section class="view" data-view="history" aria-label="History" hidden>
+    <section class="card">
+      <h2 class="card-title">Scan History</h2>
+      <p class="muted">Scan cycles observed live by this page from the backend.
+      The service keeps the latest results per country; this log records every
+      cycle you have seen this session.</p>
+      <div id="historyList" class="history-list"></div>
+      <div id="historyEmpty" class="empty-state">
+        No scan cycles observed yet this session. Start one from the
+        <a href="#" data-goto="scan">Scan</a> tab.
+      </div>
+    </section>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="view" data-view="settings" aria-label="Settings" hidden>
+    <section class="card">
+      <h2 class="card-title">About</h2>
+      <dl class="info-list">
+        <div><dt>Service</dt><dd id="cfgService">Luphahla Bugscan</dd></div>
+        <div><dt>Role</dt><dd>Network Diagnostics</dd></div>
+        <div><dt>Default country</dt><dd id="cfgDefault">-</dd></div>
+        <div><dt>Countries tracked</dt><dd id="cfgCountries">-</dd></div>
+        <div><dt>Scan ports</dt><dd id="cfgPorts">-</dd></div>
+        <div><dt>Auto-reverify</dt><dd id="cfgReverify">-</dd></div>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">Endpoints</h2>
+      <ul id="cfgEndpoints" class="tips mono"></ul>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">Security note</h2>
+      <p class="muted">All scanning, harvesting and verification logic runs
+      server-side. This page contains no credentials or keys - it only reads
+      the public JSON APIs above. Only use verified hosts on networks you are
+      authorised to test.</p>
+    </section>
+  </section>
+
+</main>
+
+<nav class="bottomnav" aria-label="Primary">
+  <button class="nav-btn" data-goto="overview" aria-label="Overview">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1z"
+            fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    </svg>
+    <span>Overview</span>
+  </button>
+  <button class="nav-btn" data-goto="hosts" aria-label="Hosts">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M3 9h18M9 4v16" stroke="currentColor" stroke-width="2"/>
+    </svg>
+    <span>Hosts</span>
+  </button>
+  <button id="navScan" class="nav-btn nav-scan" data-goto="scan" aria-label="Scan">
+    <span class="scan-orbit" aria-hidden="true">
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 12l5-3M12 2v3M2 12h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </span>
+    <span>Scan</span>
+  </button>
+  <button class="nav-btn" data-goto="history" aria-label="History">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <span>History</span>
+  </button>
+  <button class="nav-btn" data-goto="settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-.9-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-.9a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"
+            fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    </svg>
+    <span>Settings</span>
+  </button>
+</nav>
+
+<div id="toast" class="toast" role="alert" hidden></div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>
