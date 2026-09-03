@@ -1,35 +1,27 @@
-/* app.js — Luphahla Bugscan dashboard client.
-
-Changes in this version (the "Connecting... / Backend unreachable" fix):
-  1. API_BASE — when the page is NOT served from Render (APK WebView,
-     file://, locally bundled assets), all API calls use the absolute
-     Render origin. Relative URLs previously hit the APK's internal
-     origin and failed.
-  2. Cold-start tolerant fetch — 45s timeout + 1 automatic retry, because
-     the Render free tier can take 30-60s to wake up.
-  3. Defensive rendering — missing summary element IDs are skipped
-     harmlessly instead of throwing.
-*/
-
+/* app.js - Luphahla Bugscan dashboard (v4 - complete single file) */
 (function () {
 "use strict";
 
-// ---------------------------------------------------------------------------
-// API base — CHANGE THIS to your actual Render URL if it differs
-// ---------------------------------------------------------------------------
-
-var SERVICE_URL = window.LUPHAHLA_API_URL || "https://luphahla-bugscan.onrender.com";
-
-function isServiceOrigin() {
-  return /(^|\.)onrender\.com$/.test(location.hostname);
+/* ---------- API base ---------- */
+var API_BASE = "";
+if (!/(^|\.)onrender\.com$/.test(location.hostname)) {
+  API_BASE = window.LUPHAHLA_API_URL || "https://luphahla-bugscan.onrender.com";
 }
 
-var API_BASE = isServiceOrigin() ? "" : SERVICE_URL;
+/* ---------- state ---------- */
+var state = {
+  country: "zw",
+  config: null,
+  last: null,
+  searchTerm: "",
+  sortMode: "fastest",
+  filterVerdict: "working",
+  lastCycle: 0,
+  history: [],
+  timer: null
+};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
+/* ---------- helpers ---------- */
 function $(id) { return document.getElementById(id); }
 
 function setText(id, value) {
@@ -44,92 +36,25 @@ function esc(v) {
   });
 }
 
-function sleep(ms) {
-  return new Promise(function (r) { setTimeout(r, ms); });
-}
-
 function fmtTime(epoch) {
-  if (!epoch) return "—";
-  var d = new Date(epoch * 1000);
-  return d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  if (!epoch) return "-";
+  return new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
-function fmtInterval(s) {
-  if (!s) return "—";
-  if (s % 3600 === 0) return (s / 3600) + " h";
-  if (s % 60 === 0) return (s / 60) + " min";
-  return s + " s";
+function fmtKbps(k) {
+  if (k == null) return "-";
+  if (k >= 1000) return (k / 1000).toFixed(1) + " MB/s";
+  return k.toFixed(1) + " KB/s";
 }
-
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-
-var state = {
-  config: null, last: null, country: "zw", countries: [],
-  searchTerm: "", sortMode: "fastest", filterVerdict: "working",
-  history: [], lastCycle: 0, pollTimer: null
-};
-
-// ---------------------------------------------------------------------------
-// Fetch — 45s timeout + 1 retry (Render cold start)
-// ---------------------------------------------------------------------------
-
-async function fetchJSON(url, attempt) {
-  attempt = attempt || 1;
-  var controller = new AbortController();
-  var timer = setTimeout(function () { controller.abort(); }, 45000);
-  try {
-    var resp = await fetch(url, { signal: controller.signal });
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    return await resp.json();
-  } catch (err) {
-    if (err.name === "AbortError") {
-      err = new Error("request timed out (service waking up?)");
-    }
-    // Render free tier cold start can take 30-60s — retry once
-    if (attempt < 2) {
-      await sleep(3000);
-      return fetchJSON(url, attempt + 1);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function postJSON(url, body) {
-  var controller = new AbortController();
-  var timer = setTimeout(function () { controller.abort(); }, 45000);
-  try {
-    var resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
-      signal: controller.signal
-    });
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Status pill / error banner / toast
-// ---------------------------------------------------------------------------
 
 function setStatus(mode) {
-  var pill = $("statusPill"), text = $("statusText");
-  if (pill) {
-    pill.className = "status-pill " +
-      (mode === "live" ? "is-live" :
-       mode === "error" ? "is-error" : "is-connecting");
-  }
+  var pill = $("statusPill");
+  var text = $("statusText");
+  if (pill) pill.className = "status-pill " + mode;
   if (text) {
-    text.textContent =
-      mode === "live" ? "LIVE" :
-      mode === "error" ? "Backend unreachable" : "Connecting...";
+    if (mode === "is-live") text.textContent = "LIVE";
+    else if (mode === "is-error") text.textContent = "Backend unreachable";
+    else text.textContent = "Connecting...";
   }
 }
 
@@ -143,7 +68,6 @@ function hideError() {
 }
 
 var toastTimer = null;
-
 function toast(msg) {
   var el = $("toast");
   if (!el) return;
@@ -153,128 +77,128 @@ function toast(msg) {
   toastTimer = setTimeout(function () { el.hidden = true; }, 4000);
 }
 
-// ---------------------------------------------------------------------------
-// Data loading
-// ---------------------------------------------------------------------------
-
-async function loadConfig() {
-  var cfg = await fetchJSON(API_BASE + "/api/config");
-  state.config = cfg;
-  state.country = cfg.default_country || state.country;
-  renderConfig(cfg);
-  renderCountrySelect();
-  setStatus("live");
+/* ---------- network (retry once for Render cold start) ---------- */
+function fetchJSON(url, attempt) {
+  attempt = attempt || 1;
+  return fetch(url).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).catch(function (err) {
+    if (attempt < 2) {
+      return new Promise(function (res) { setTimeout(res, 3000); })
+        .then(function () { return fetchJSON(url, attempt + 1); });
+    }
+    throw err;
+  });
 }
 
-async function loadResults() {
+function postJSON(url, body) {
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  });
+}
+
+/* ---------- data ---------- */
+function loadConfig() {
+  return fetchJSON(API_BASE + "/api/config").then(function (cfg) {
+    state.config = cfg;
+    state.country = cfg.default_country || state.country;
+    renderConfig(cfg);
+    renderCountrySelect();
+    updateFeedLinks();
+    setStatus("is-live");
+  });
+}
+
+function loadResults() {
   pollOnce();
-  if (state.pollTimer) clearInterval(state.pollTimer);
-  state.pollTimer = setInterval(pollOnce, 30000);
+  if (state.timer) clearInterval(state.timer);
+  state.timer = setInterval(pollOnce, 30000);
 }
 
-async function pollOnce() {
-  try {
-    var url = API_BASE + "/api/results" +
-      (state.country ? "?country=" + encodeURIComponent(state.country) : "");
-    var data = await fetchJSON(url);
+function pollOnce() {
+  var url = API_BASE + "/api/results?country=" + encodeURIComponent(state.country);
+  return fetchJSON(url).then(function (data) {
     state.last = data;
     renderResults(data);
     hideError();
-    setStatus("live");
-  } catch (err) {
-    setStatus("error");
+    setStatus("is-live");
+  }).catch(function (err) {
+    setStatus("is-error");
     showError("Backend unreachable: " + err.message);
-  }
+  });
+}
+
+function forceScan() {
+  toast("Rescan requested...");
+  postJSON(API_BASE + "/api/scan", { country: state.country })
+    .then(function () {
+      toast("Rescan started - verifying hosts now");
+      pollOnce();
+    })
+    .catch(function (err) {
+      toast("Rescan failed: " + err.message);
+    });
 }
 
 function switchCountry(cc) {
+  if (!cc || cc === state.country) return;
   state.country = cc;
   renderCountrySelect();
   updateFeedLinks();
   pollOnce();
 }
 
-async function forceScan() {
-  try {
-    toast("Rescan requested...");
-    await postJSON(API_BASE + "/api/scan", { country: state.country });
-    toast("Rescan started — verifying hosts now");
-    pollOnce();
-  } catch (err) {
-    toast("Rescan failed: " + err.message);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Rendering — config / countries / feed links
-// ---------------------------------------------------------------------------
-
+/* ---------- rendering ---------- */
 function renderConfig(cfg) {
   setText("cfgService", cfg.tool || "Luphahla Bugscan");
   setText("cfgDefault", (cfg.default_country || "").toUpperCase());
-  setText("cfgCountries",
-    Object.keys(cfg.countries || {}).length + " regions");
+  setText("cfgCountries", Object.keys(cfg.countries || {}).length + " regions");
   setText("cfgPorts", (cfg.ports || []).join(", "));
-  setText("cfgReverify", fmtInterval(cfg.reverify_every_s));
+  var s = cfg.reverify_every_s || 0;
+  setText("cfgReverify", s % 3600 === 0 ? (s / 3600) + " h" : (s / 60) + " min");
 
-  if (cfg.endpoints) {
+  if (cfg.endpoints && $("cfgEndpoints")) {
     var list = $("cfgEndpoints");
-    if (list) {
-      list.innerHTML = "";
-      for (var name in cfg.endpoints) {
-        if (!Object.prototype.hasOwnProperty.call(cfg.endpoints, name)) continue;
-        var li = document.createElement("li");
-        li.textContent = name + " -> " + cfg.endpoints[name];
-        list.appendChild(li);
+    var html = "";
+    for (var name in cfg.endpoints) {
+      if (Object.prototype.hasOwnProperty.call(cfg.endpoints, name)) {
+        html += "<li>" + esc(name) + " -&gt; " + esc(cfg.endpoints[name]) + "</li>";
       }
     }
+    list.innerHTML = html;
   }
-  if (cfg.ports && $("scanPorts")) {
-    $("scanPorts").textContent = cfg.ports.join(", ");
-  }
+  if (cfg.ports) setText("scanPorts", cfg.ports.join(", "));
   setText("sumCountry", (cfg.default_country || "").toUpperCase());
 }
 
 function renderCountrySelect() {
   var sel = $("countrySelect");
-  if (!sel) return;
-
-  state.countries = [];
-  var cfg = state.config || {};
-  for (var code function renderCountrySelect() {
-  var sel = $("countrySelect");
-  if (!sel) return;
-
-  state.countries = [];
-  var cfg = state.config || {};
-  for (var code in cfg.countries) {
-    if (!Object.prototype.hasOwnProperty.call(cfg.countries, code)) continue;
-    state.countries.push({ code: code,
-                           label: cfg.countries[code].label || code.toUpperCase() });
-  }
-
+  if (!sel || !state.config) return;
   var html = "";
-  for (var i = 0; i < state.countries.length; i++) {
-    var c = state.countries[i];
-    html += '<option value="' + esc(c.code) + '"' +
-            (c.code === state.country ? " selected" : "") + ">" +
-            esc(c.label) + "</option>";
+  var countries = state.config.countries || {};
+  for (var code in countries) {
+    if (!Object.prototype.hasOwnProperty.call(countries, code)) continue;
+    var label = countries[code].label || code.toUpperCase();
+    html += '<option value="' + esc(code) + '"' +
+            (code === state.country ? " selected" : "") + ">" +
+            esc(label) + "</option>";
   }
   sel.innerHTML = html;
   sel.value = state.country;
-  updateFeedLinks();
 }
 
 function updateFeedLinks() {
   var cc = encodeURIComponent(state.country);
-  if ($("feedHosts")) $("feedHosts").href = "/hosts?country=" + cc;
-  if ($("feedTop")) $("feedTop").href = "/top?country=" + cc;
-  if ($("feedApi")) $("feedApi").href = "/api/results?country=" + cc;
+  if ($("feedHosts")) $("feedHosts").href = API_BASE + "/hosts?country=" + cc;
+  if ($("feedTop")) $("feedTop").href = API_BASE + "/top?country=" + cc;
+  if ($("feedApi")) $("feedApi").href = API_BASE + "/api/results?country=" + cc;
 }
-
-// ---------------------------------------------------------------------------
-// Rendering — results / summary / top3 / host table
-// ---------------------------------------------------------------------------
 
 function countWorking(rows) {
   var n = 0;
@@ -284,201 +208,140 @@ function countWorking(rows) {
   return n;
 }
 
+function verdictRank(r) {
+  if (r.verdict === "fast") return 0;
+  if (r.verdict === "usable") return 1;
+  return 2;
+}
+
 function filterRows(rows) {
   var out = [];
   var term = state.searchTerm;
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
-    if (state.filterVerdict === "working" &&
-        r.verdict !== "fast" && r.verdict !== "usable") continue;
+    var isWorking = r.verdict === "fast" || r.verdict === "usable";
+    if (state.filterVerdict === "working" && !isWorking) continue;
     if (state.filterVerdict === "fast" && r.verdict !== "fast") continue;
     if (state.filterVerdict === "usable" && r.verdict !== "usable") continue;
-    if (state.filterVerdict === "blocked" &&
-        r.verdict === "fast" && r.verdict === "usable") continue;
-    if (state.filterVerdict === "all" || state.filterVerdict === "blocked") {
-      // "all" passes everything; "blocked" passes everything non-working
-      if (state.filterVerdict === "blocked" &&
-          (r.verdict === "fast" || r.verdict === "usable")) continue;
-    }
+    if (state.filterVerdict === "blocked" && isWorking) continue;
     if (term && r.host.toLowerCase().indexOf(term) === -1) continue;
     out.push(r);
   }
-  return sortRows(out);
-}
-
-function sortRows(rows) {
-  var sorted = rows.slice();
-  if (state.sortMode === "fastest") {
-    sorted.sort(function (a, b) {
-      var w = verdictRank(a) - verdictRank(b);
-      if (w) return w;
-      return (b.speed_kbps || 0) - (a.speed_kbps || 0);
-    });
-  } else if (state.sortMode === "name") {
-    sorted.sort(function (a, b) { return a.host < b.host ? -1 : 1; });
-  } else if (state.sortMode === "status") {
-    sorted.sort(function (a, b) {
+  out.sort(function (a, b) {
+    if (state.sortMode === "name") return a.host < b.host ? -1 : 1;
+    if (state.sortMode === "status") {
       return (a.status_code || 999) - (b.status_code || 999);
-    });
-  }
-  return sorted;
-}
-
-function verdictRank(r) {
-  return r.verdict === "fast" ? 0 :
-         r.verdict === "usable" ? 1 : 2;
+    }
+    var w = verdictRank(a) - verdictRank(b);
+    if (w) return w;
+    return (b.speed_kbps || 0) - (a.speed_kbps || 0);
+  });
+  return out;
 }
 
 function verdictClass(v) {
-  return v === "fast" ? "v-fast" :
-         v === "usable" ? "v-usable" :
-         v === "throttled" ? "v-throt" :
-         v === "proxy-mitm" ? "v-mitm" : "v-tls";
+  if (v === "fast") return "v-fast";
+  if (v === "usable") return "v-usable";
+  if (v === "throttled") return "v-throt";
+  if (v === "proxy-mitm") return "v-mitm";
+  return "v-tls";
 }
 
 function renderResults(data) {
   var rows = data.results || [];
   var working = countWorking(rows);
 
-  // --- summary card (all defensive — missing IDs are skipped) ---
   setText("verifiedCount", working + " / " + rows.length);
-  setText("hostsCount", rows.length + " scanned");
-  setText("sumCountry", (data.country || "").toUpperCase());
-  setText("lastScan", data.last_epoch ? fmtTime(data.last_epoch) : "—");
-  setText("lastCycle", data.scan_count ? "cycle #" + data.scan_count : "—");
-  setText("scanCount", rows.length ? rows.length + " hosts" : "—");
-  setText("scanPorts", (data.ports || []).join(", "));
+  setText("sumCountry", (data.country || state.country).toUpperCase());
+  setText("lastScan", data.last_epoch ? fmtTime(data.last_epoch) : "-");
+  setText("lastCycle", data.scan_count ? "cycle #" + data.scan_count : "-");
   setText("scanPhase", data.phase || (data.scanning ? "scanning" : "idle"));
 
-  var phase = $("scanPhase");
-  if (phase) {
-    phase.className = data.scanning ? "phase is-scanning" : "phase is-idle";
-  }
-
-  // --- top 3 fastest working hosts ---
-  var fast = rows.filter(function (r) { return r.verdict === "fast"; })
-    .sort(function (a, b) { return (b.speed_kbps || 0) - (a.speed_kbps || 0); })
-    .slice(0, 3);
-
+  /* top 3 fastest */
   var topList = $("topFastList");
   if (topList) {
+    var fast = [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].verdict === "fast") fast.push(rows[i]);
+    }
+    fast.sort(function (a, b) { return (b.speed_kbps || 0) - (a.speed_kbps || 0); });
+    fast = fast.slice(0, 3);
     if (!fast.length) {
-      topList.innerHTML = '<div class="empty-state">No verified hosts yet - ' +
-        'the first scan is still gathering data.</div>';
+      topList.innerHTML = '<div class="empty-state">No verified hosts yet.</div>';
     } else {
-      topList.innerHTML = fast.map(function (r) {
-        return '<div class="top-row"><span class="mono">' + esc(r.host) +
-          "</span><span>" + fmtKbps(r.speed_kbps) + "</span></div>";
-      }).join("");
+      var thtml = "";
+      for (var j = 0; j < fast.length; j++) {
+        thtml += '<div class="top-row"><span class="mono">' + esc(fast[j].host) +
+                 "</span><span>" + fmtKbps(fast[j].speed_kbps) + "</span></div>";
+      }
+      topList.innerHTML = thtml;
     }
   }
 
-  // --- recently verified (first 5 working) ---
-  var recentList = $("recentList");
-  if (recentList) {
-    var recent = rows.filter(function (r) {
-      return r.verdict === "fast" || r.verdict === "usable";
-    }).slice(0, 5);
-    recentList.innerHTML = recent.length
-      ? recent.map(function (r) {
-          return '<div class="recent-row"><span class="mono">' + esc(r.host) +
-            ":" + r.port + "</span><span>" + esc(r.verdict) + "</span></div>";
-        }).join("")
-      : '<div class="empty-state">Nothing verified yet.</div>';
-  }
-
-  // --- host table ---
-  renderHosts(data);
-
-  // --- cycle history (new cycles observed this session) ---
+  renderHosts(rows);
   detectCycleEvents(data);
 }
 
-function fmtKbps(kbps) {
-  if (kbps == null) return "—";
-  if (kbps >= 1000) return (kbps / 1000).toFixed(1) + " MB/s";
-  return kbps.toFixed(1) + " KB/s";
-}
-
-function renderHosts(data) {
-  var rows = filterRows(data.results || []);
+function renderHosts(rows) {
   var body = $("rowsBody");
-  var counter = $("hostsCounter");
-
-  if (counter) counter.textContent = rows.length + " hosts";
+  var filtered = filterRows(rows);
+  if ($("hostsCounter")) {
+    $("hostsCounter").textContent = filtered.length + " hosts";
+  }
   if (!body) return;
 
-  if (!rows.length) {
+  if (!filtered.length) {
     body.innerHTML = '<tr><td colspan="6" class="empty-state">' +
-      (state.last && (state.last.results || []).length
-        ? "No results match."
-        : "No hosts yet — start a scan.") +
+      (rows.length ? "No results match." : "No hosts yet - scan is still running.") +
       "</td></tr>";
-    if ($("emptyState")) $("emptyState").hidden = true;
     return;
   }
-
   var html = "";
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    html +=
-      '<tr data-host="' + esc(r.host) + '" data-index="' + i + '">' +
-      "<td>" + (i + 1) + "</td>" +
-      '<td class="mono">' + esc(r.host) + "</td>" +
-      "<td>" + r.port + "</td>" +
-      '<td class="' + verdictClass(r.verdict) + '">' + esc(r.verdict) + "</td>" +
-      "<td>" + fmtKbps(r.speed_kbps) + "</td>" +
-      "<td>" + esc(r.server_header || "—") + "</td>" +
-      "</tr>";
+  for (var i = 0; i < filtered.length; i++) {
+    var r = filtered[i];
+    html += '<tr data-index="' + i + '">' +
+            "<td>" + (i + 1) + "</td>" +
+            '<td class="mono">' + esc(r.host) + "</td>" +
+            "<td>" + r.port + "</td>" +
+            '<td class="' + verdictClass(r.verdict) + '">' + esc(r.verdict) + "</td>" +
+            "<td>" + fmtKbps(r.speed_kbps) + "</td>" +
+            "<td>" + esc(r.server_header || "-") + "</td></tr>";
   }
   body.innerHTML = html;
-  if ($("emptyState")) $("emptyState").hidden = true;
 }
-
-// ---------------------------------------------------------------------------
-// Cycle history
-// ---------------------------------------------------------------------------
 
 function detectCycleEvents(data) {
   var cycle = data.scan_count || 0;
   var working = countWorking(data.results || []);
-
-  if (state.lastCycle === 0) {
-    if (data.scanning) {
-      pushHistory("Scan in progress (cycle #" + cycle + ")", "started");
-    } else if (cycle > 0) {
-      pushHistory("Results loaded (cycle #" + cycle + ") - " +
-                  working + " verified", "done");
-    }
+  if (state.lastCycle === 0 && cycle > 0 && !data.scanning) {
+    pushHistory("Results loaded (cycle #" + cycle + ") - " + working + " verified", "done");
   } else if (cycle > state.lastCycle) {
-    pushHistory("Scan cycle #" + cycle + " complete - " +
-                working + " verified", "done");
+    pushHistory("Scan cycle #" + cycle + " complete - " + working + " verified", "done");
   }
   state.lastCycle = Math.max(state.lastCycle, cycle);
   renderHistory();
 }
 
 function pushHistory(text, kind) {
-  state.history.unshift({ text: text, kind: kind || "done",
-                          time: fmtTime(Date.now() / 1000) });
+  state.history.unshift({ text: text, kind: kind || "done", time: fmtTime(Date.now() / 1000) });
   if (state.history.length > 50) state.history.length = 50;
 }
 
 function renderHistory() {
-  var list = $("historyList"), empty = $("historyEmpty");
+  var list = $("historyList");
+  var empty = $("historyEmpty");
   if (empty) empty.hidden = state.history.length > 0;
   if (!list) return;
-  list.innerHTML = state.history.map(function (h) {
-    return '<div class="history-row is-' + esc(h.kind) + '">' +
-           "<span>" + esc(h.text) + "</span><span>" +
-           esc(h.time) + "</span></div>";
-  }).join("");
+  var html = "";
+  for (var i = 0; i < state.history.length; i++) {
+    html += '<div class="history-row is-' + esc(state.history[i].kind) + '">' +
+            "<span>" + esc(state.history[i].text) + "</span><span>" +
+            esc(state.history[i].time) + "</span></div>";
+  }
+  list.innerHTML = html;
 }
 
-// ---------------------------------------------------------------------------
-// View switching
-// ---------------------------------------------------------------------------
-
+/* ---------- view switching ---------- */
 function gotoView(name) {
   var views = document.querySelectorAll(".view");
   for (var i = 0; i < views.length; i++) {
@@ -487,10 +350,8 @@ function gotoView(name) {
   var btns = document.querySelectorAll("[data-goto]");
   for (var j = 0; j < btns.length; j++) {
     var b = btns[j];
-    var on = b.getAttribute("data-goto") === name;
-    if (b.classList.contains("nav-btn") ||
-        b.classList.contains("mobile-menu")) {
-      b.classList.toggle("is-active", on);
+    if (b.classList.contains("nav-btn")) {
+      b.classList.toggle("is-active", b.getAttribute("data-goto") === name);
     }
   }
   var menu = $("mobileMenu");
@@ -498,13 +359,10 @@ function gotoView(name) {
     menu.hidden = true;
     if ($("menuBtn")) $("menuBtn").setAttribute("aria-expanded", "false");
   }
-  window.scrollTo({ top: 0 });
+  window.scrollTo(0, 0);
 }
 
-// ---------------------------------------------------------------------------
-// Row detail (tap a row for host info)
-// ---------------------------------------------------------------------------
-
+/* ---------- row detail ---------- */
 function toggleDetail(tr) {
   var next = tr.nextElementSibling;
   if (next && next.classList.contains("detail-row")) {
@@ -512,33 +370,27 @@ function toggleDetail(tr) {
     return;
   }
   var idx = Number(tr.getAttribute("data-index"));
-  var rows = filterRows((state.last && state.last.results) || []);
+  var rows = state.last ? filterRows(state.last.results || []) : [];
   var r = rows[idx];
   if (!r) return;
   var detail = document.createElement("tr");
   detail.className = "detail-row";
-  detail.innerHTML =
-    "<td></td>" +
-    '<td colspan="5"><div class="detail-grid">' +
-    '<div><b>Host:</b> <a class="host-link" href="' + API_BASE +
-    '/api/results" target="_blank" rel="noopener">' + esc(r.host) + "</a></div>" +
-    '<div><b>Port:</b> ' + r.port + "</div>" +
-    '<div><b>Verdict:</b> ' + esc(r.verdict) + "</div>" +
-    '<div><b>Reason:</b> ' + esc(r.reason || "n/a") + "</div>" +
-    '<div><b>Latency:</b> ' + (r.latency_ms != null ? r.latency_ms + " ms" : "n/a") + "</div>" +
-    '<div><b>Status code:</b> ' + (r.status_code != null ? r.status_code : "n/a") + "</div>" +
-    '<div><b>Server header:</b> ' + esc(r.server_header || "n/a") + "</div>" +
+  detail.innerHTML = "<td></td><td colspan=\"5\"><div class=\"detail-grid\">" +
+    "<div><b>Host:</b> " + esc(r.host) + "</div>" +
+    "<div><b>Port:</b> " + r.port + "</div>" +
+    "<div><b>Verdict:</b> " + esc(r.verdict) + "</div>" +
+    "<div><b>Reason:</b> " + esc(r.reason || "n/a") + "</div>" +
+    "<div><b>Latency:</b> " + (r.latency_ms != null ? r.latency_ms + " ms" : "n/a") + "</div>" +
+    "<div><b>Status code:</b> " + (r.status_code != null ? r.status_code : "n/a") + "</div>" +
+    "<div><b>Server header:</b> " + esc(r.server_header || "n/a") + "</div>" +
     "</div></td>";
   tr.after(detail);
 }
 
-// ---------------------------------------------------------------------------
-// Wiring
-// ---------------------------------------------------------------------------
-
+/* ---------- wiring ---------- */
 function wire() {
   document.addEventListener("click", function (ev) {
-    var el = ev.target.closest("[data-goto]");
+    var el = ev.target.closest ? ev.target.closest("[data-goto]") : null;
     if (el) {
       ev.preventDefault();
       gotoView(el.getAttribute("data-goto"));
@@ -566,29 +418,27 @@ function wire() {
   if ($("hSearch")) {
     $("hSearch").addEventListener("input", function () {
       state.searchTerm = this.value.trim().toLowerCase();
-      renderHosts(state.last);
+      if (state.last) renderHosts(state.last.results || []);
     });
   }
 
   if ($("hSort")) {
     $("hSort").addEventListener("change", function () {
       state.sortMode = this.value;
-      renderHosts(state.last);
+      if (state.last) renderHosts(state.last.results || []);
     });
   }
 
   if ($("chipGroup")) {
     $("chipGroup").addEventListener("click", function (ev) {
-      var chip = ev.target.closest(".chip[data-verdict]");
+      var chip = ev.target.closest ? ev.target.closest(".chip[data-verdict]") : null;
       if (!chip) return;
       state.filterVerdict = chip.getAttribute("data-verdict");
       var chips = this.querySelectorAll(".chip[data-verdict]");
       for (var i = 0; i < chips.length; i++) {
-        var on = chips[i] === chip;
-        chips[i].classList.toggle("is-on", on);
-        chips[i].setAttribute("aria-pressed", on ? "true" : "false");
+        chips[i].classList.toggle("is-on", chips[i] === chip);
       }
-      renderHosts(state.last);
+      if (state.last) renderHosts(state.last.results || []);
     });
   }
 
@@ -599,47 +449,29 @@ function wire() {
       state.sortMode = "fastest";
       if ($("hSearch")) $("hSearch").value = "";
       if ($("hSort")) $("hSort").value = "fastest";
-      var chips = document.querySelectorAll("#chipGroup .chip[data-verdict]");
-      for (var i = 0; i < chips.length; i++) {
-        var on = chips[i].getAttribute("data-verdict") === "working";
-        chips[i].classList.toggle("is-on", on);
-        chips[i].setAttribute("aria-pressed", on ? "true" : "false");
-      }
-      renderHosts(state.last);
-    });
-  }
-
-  if ($("goScanEmpty")) {
-    $("goScanEmpty").addEventListener("click", function () {
-      gotoView("scan");
+      if (state.last) renderHosts(state.last.results || []);
     });
   }
 
   if ($("rowsBody")) {
     $("rowsBody").addEventListener("click", function (ev) {
-      var tr = ev.target.closest("tr[data-host]");
-      if (!tr) return;
-      toggleDetail(tr);
+      var tr = ev.target.closest ? ev.target.closest("tr[data-index]") : null;
+      if (tr) toggleDetail(tr);
     });
   }
 }
 
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
-
-async function boot() {
+/* ---------- boot ---------- */
+function boot() {
   wire();
   gotoView("overview");
-  setStatus("connecting");
-  try {
-    await loadConfig();
-    await loadResults();
-  } catch (err) {
-    setStatus("error");
-    showError("Could not reach the backend: " + err.message +
-              " — check your connection and tap Retry.");
-  }
+  setStatus("is-connecting");
+  loadConfig()
+    .then(loadResults)
+    .catch(function (err) {
+      setStatus("is-error");
+      showError("Could not reach the backend: " + err.message);
+    });
 }
 
 if (document.readyState === "loading") {
