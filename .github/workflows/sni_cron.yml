@@ -1,4 +1,3 @@
-
 name: SNI host scan
 
 on:
@@ -26,14 +25,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Harvest + scan + verify hosts
-        run: python main.py --probe
+        run: python main.py --reuse-harvest
 
       - name: Commit updated clean_hosts.txt
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add clean_hosts.txt
-          git diff --cached --quiet || git commit -m "auto: refresh verified SNI hosts [skip ci]"
+          git diff --cached --quiet || git commit -m "chore(scan): refresh verified SNI hosts [$(date -u +'%Y-%m-%d %H:%M UTC')]"
           git push
 
       - name: Keep Render awake + sync check
